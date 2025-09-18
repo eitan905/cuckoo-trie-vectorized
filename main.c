@@ -4,11 +4,11 @@
 #include <stddef.h>
 #include <sys/mman.h>
 #include <stdio.h>
+#include <immintrin.h>
 
 #include "cuckoo_trie.h"
 #include "random.h"
 #include "main.h"
-#include "vectorized_search.h"
 #include "util.h"
 
 // The root has to have a last symbol in order to have an alternate bucket.
@@ -203,6 +203,118 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 		__builtin_prefetch((uint8_t*)(&(trie->buckets[secondary_bucket])) + i);
 	}
 }
+
+#ifdef USE_VECTORIZED_SEARCH
+ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
+														  ct_entry_local_copy* result, uint64_t is_secondary,
+														  uint64_t tag, uint64_t color) {
+	uint64_t header_mask = 0;
+	uint64_t header_values = 0;
+
+	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+
+	header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
+
+	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+	if (is_secondary)
+		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+
+#ifdef MULTITHREADING
+	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
+	if (start_counter & SEQ_INCREMENT)
+		return NULL;
+#else
+	assert(bucket->write_lock_and_seq == 0);
+#endif
+
+	// Load first 8 bytes of each entry (covers the header fields we need)
+	uint64_t headers[4];
+	for (int j = 0; j < 4; j++) {
+		headers[j] = *((uint64_t*)&bucket->cells[j]);
+	}
+	
+	__m256i mask_vec = _mm256_set1_epi64x(header_mask);
+	__m256i values_vec = _mm256_set1_epi64x(header_values);
+	__m256i headers_vec = _mm256_loadu_si256((__m256i*)headers);
+	__m256i masked = _mm256_and_si256(headers_vec, mask_vec);
+	__m256i cmp = _mm256_cmpeq_epi64(masked, values_vec);
+	int mask = _mm256_movemask_epi8(cmp);
+	
+	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
+	if (i == CUCKOO_BUCKET_SIZE)
+		return NULL;
+
+	read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+
+#ifdef MULTITHREADING
+	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
+		return NULL;
+	result->last_seq = start_counter;
+#endif
+
+	result->last_pos = &(bucket->cells[i]);
+	return result->last_pos;
+}
+
+ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
+														   ct_entry_local_copy* result, uint64_t is_secondary,
+														   uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+	uint64_t header_mask = 0;
+	uint64_t header_values = 0;
+
+	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+
+	header_mask |= 0xFFULL << (8*offsetof(ct_entry, last_symbol));
+	header_values |= last_symbol << (8*offsetof(ct_entry, last_symbol));
+
+	const uint64_t parent_color_mask = (0xFFULL << PARENT_COLOR_SHIFT) & 0xFF;
+	header_mask |= parent_color_mask << (8*offsetof(ct_entry, parent_color_and_flags));
+	header_values |= parent_color << (8*offsetof(ct_entry, parent_color_and_flags) + PARENT_COLOR_SHIFT);
+
+	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+	if (is_secondary)
+		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+
+#ifdef MULTITHREADING
+	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
+	if (start_counter & SEQ_INCREMENT)
+		return NULL;
+#else
+	assert(bucket->write_lock_and_seq == 0);
+#endif
+
+	// Load first 8 bytes of each entry (covers the header fields we need)
+	uint64_t headers[4];
+	for (int j = 0; j < 4; j++) {
+		headers[j] = *((uint64_t*)&bucket->cells[j]);
+	}
+	
+	__m256i mask_vec = _mm256_set1_epi64x(header_mask);
+	__m256i values_vec = _mm256_set1_epi64x(header_values);
+	__m256i headers_vec = _mm256_loadu_si256((__m256i*)headers);
+	__m256i masked = _mm256_and_si256(headers_vec, mask_vec);
+	__m256i cmp = _mm256_cmpeq_epi64(masked, values_vec);
+	int mask = _mm256_movemask_epi8(cmp);
+	
+	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
+	if (i == CUCKOO_BUCKET_SIZE)
+		return NULL;
+
+	read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+
+#ifdef MULTITHREADING
+	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
+		return NULL;
+	result->last_seq = start_counter;
+#endif
+
+	result->last_pos = &(bucket->cells[i]);
+	return result->last_pos;
+}
+#endif
 
 ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
