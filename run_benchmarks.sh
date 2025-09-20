@@ -31,10 +31,10 @@ run_benchmark() {
     local total_throughput=0
     local valid_runs=0
     
-    echo "Running: $bench_cmd $key_size ($RUNS times)" | tee -a $RESULTS_FILE
+    echo "Running: $bench_cmd $key_size ($RUNS times)"
     
     for ((run=1; run<=RUNS; run++)); do
-        echo -n "  Run $run/$RUNS... " | tee -a $RESULTS_FILE
+        echo -n "  Run $run/$RUNS... "
         output=$(eval "./benchmark $bench_cmd $key_size" 2>&1)
         
         # Extract ops and ms from RESULT line
@@ -45,21 +45,21 @@ run_benchmark() {
             throughput=$(echo "scale=3; $ops * 1000 / $ms / 1000000" | bc -l)
             total_throughput=$(echo "scale=3; $total_throughput + $throughput" | bc -l)
             valid_runs=$((valid_runs + 1))
-            echo "${throughput} Mops/s" | tee -a $RESULTS_FILE
+            echo "${throughput} Mops/s"
         else
-            echo "FAILED" | tee -a $RESULTS_FILE
+            echo "FAILED"
         fi
     done
     
     if [[ $valid_runs -gt 0 ]]; then
         avg_throughput=$(echo "scale=2; $total_throughput / $valid_runs" | bc -l)
-        echo "  Average: ${avg_throughput} Mops/s" | tee -a $RESULTS_FILE
+        echo "  Average: ${avg_throughput} Mops/s"
         echo "$avg_throughput"
     else
-        echo "  Average: N/A" | tee -a $RESULTS_FILE
+        echo "  Average: N/A"
         echo "N/A"
     fi
-    echo | tee -a $RESULTS_FILE
+    echo
 }
 
 for key_size in "${key_sizes[@]}"; do
