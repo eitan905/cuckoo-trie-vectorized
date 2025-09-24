@@ -2416,12 +2416,25 @@ void init_buckets(cuckoo_trie* trie) {
 	uint64_t bucket_num;
 
 	for (bucket_num = 0; bucket_num < trie->num_buckets; bucket_num++) {
+#ifdef USE_VECTORIZED_SEARCH
+		// Initialize all entries in the bucket using vectorized stores
+		const ct_entry unused_entry = {
+			.parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED,
+			.color_and_tag = INVALID_COLOR << TAG_BITS
+		};
+		
+		// Replicate the unused entry pattern across all 4 cells
+		for (int i = 0; i < CUCKOO_BUCKET_SIZE; i++) {
+			memcpy(&trie->buckets[bucket_num].cells[i], &unused_entry, sizeof(ct_entry_storage));
+		}
+#else
 		int i;
 		for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
 			ct_entry_storage* entry = &(trie->buckets[bucket_num].cells[i]);
 			((ct_entry*) entry)->parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED;
 			((ct_entry*) entry)->color_and_tag = INVALID_COLOR << TAG_BITS;
 		}
+#endif
 		trie->buckets[bucket_num].write_lock_and_seq = 0;
 	}
 }
