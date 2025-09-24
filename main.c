@@ -230,14 +230,17 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 #endif
 
 	// Load first 8 bytes of each entry (covers the header fields we need)
-	uint64_t headers[4];
-	for (int j = 0; j < 4; j++) {
-		headers[j] = *((uint64_t*)&bucket->cells[j]);
-	}
-	
-	__m256i mask_vec = _mm256_set1_epi64x(header_mask);
-	__m256i values_vec = _mm256_set1_epi64x(header_values);
-	__m256i headers_vec = _mm256_loadu_si256((__m256i*)headers);
+	const uint64_t* base64 = (const uint64_t*)&bucket->cells[0];
+	// _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
+	__m256i headers_vec = _mm256_set_epi64x(
+		base64[6],
+		base64[4],
+		base64[2],
+		base64[0]
+	);
+
+	__m256i mask_vec = _mm256_set1_epi64x((long long)header_mask);
+	__m256i values_vec = _mm256_set1_epi64x((long long)header_values);
 	__m256i masked = _mm256_and_si256(headers_vec, mask_vec);
 	__m256i cmp = _mm256_cmpeq_epi64(masked, values_vec);
 	int mask = _mm256_movemask_epi8(cmp);
@@ -287,17 +290,23 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #endif
 
 	// Load first 8 bytes of each entry (covers the header fields we need)
-	uint64_t headers[4];
-	for (int j = 0; j < 4; j++) {
-		headers[j] = *((uint64_t*)&bucket->cells[j]);
-	}
-	
-	__m256i mask_vec = _mm256_set1_epi64x(header_mask);
-	__m256i values_vec = _mm256_set1_epi64x(header_values);
-	__m256i headers_vec = _mm256_loadu_si256((__m256i*)headers);
-	__m256i masked = _mm256_and_si256(headers_vec, mask_vec);
-	__m256i cmp = _mm256_cmpeq_epi64(masked, values_vec);
-	int mask = _mm256_movemask_epi8(cmp);
+	const uint64_t* base64 = (const uint64_t*)&bucket->cells[0];
+    // _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
+    __m256i headers_vec = _mm256_set_epi64x(
+        base64[6],  // cell[3] header @ +48B
+        base64[4],  // cell[2] header @ +32B
+        base64[2],  // cell[1] header @ +16B
+        base64[0]   // cell[0] header @ +0B
+    );
+
+    // 2) Broadcast mask/value to all 4 lanes.
+    __m256i mask_vec   = _mm256_set1_epi64x((long long)header_mask);
+    __m256i values_vec = _mm256_set1_epi64x((long long)header_values);
+
+    // 3) (header & mask) == value, per lane, then compress result to a byte mask.
+    __m256i masked = _mm256_and_si256(headers_vec, mask_vec);
+    __m256i cmp    = _mm256_cmpeq_epi64(masked, values_vec);
+    int     mask   = _mm256_movemask_epi8(cmp);
 	
 	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
 	if (i == CUCKOO_BUCKET_SIZE)
@@ -325,14 +334,18 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
-
+	
+	/* Add tag bits to mask*/
 	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
-
+	/* Add tag bits to values*/
+	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));	
+	/* Add color bits to mask*/
 	header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
+	/* Add color bits to values*/
 	header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
-
+	/* Add secondary bucket flag to mask*/
 	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+	/* Add secondary bucket flag to values if needed*/
 	if (is_secondary)
 		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
 
