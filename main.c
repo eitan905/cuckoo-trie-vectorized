@@ -503,7 +503,33 @@ ct_entry_storage* find_entry_in_pair_by_parent(cuckoo_trie* trie, ct_entry_local
 	return entry_addr;
 }
 
+#ifdef USE_VECTORIZED_SEARCH
+ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket) {
+	// Load first 8 bytes of each entry (covers type field)
+	__m256i headers_vec = _mm256_set_epi64x(
+		*((uint64_t*)&bucket->cells[3]),
+		*((uint64_t*)&bucket->cells[2]),
+		*((uint64_t*)&bucket->cells[1]),
+		*((uint64_t*)&bucket->cells[0])
+	);
+
+	// Create mask for TYPE_UNUSED using TYPE_MASK
+	__m256i type_mask = _mm256_set1_epi64x(TYPE_MASK);
+	__m256i unused_val = _mm256_set1_epi64x(TYPE_UNUSED);
+	
+	__m256i masked = _mm256_and_si256(headers_vec, type_mask);
+	__m256i cmp = _mm256_cmpeq_epi64(masked, unused_val);
+	int mask = _mm256_movemask_epi8(cmp);
+	
+	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
+	return (i == CUCKOO_BUCKET_SIZE) ? NULL : &(bucket->cells[i]);
+}
+#endif
+
 ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
+#ifdef USE_VECTORIZED_SEARCH
+	return find_free_cell_in_bucket_vectorized(bucket);
+#else
 	int i;
 
 	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
@@ -513,6 +539,7 @@ ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
 	}
 
 	return NULL;
+#endif
 }
 
 ct_entry_storage* find_root(cuckoo_trie* trie, ct_entry_local_copy* result) {
