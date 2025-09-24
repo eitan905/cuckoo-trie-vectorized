@@ -4,6 +4,19 @@ RESULTS_FILE="vectorization_benchmark_results.txt"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 RUNS=5
 
+# Parse command line arguments
+while getopts "i:" opt; do
+    case $opt in
+        i)
+            RUNS=$OPTARG
+            ;;
+        \?)
+            echo "Usage: $0 [-i iterations]"
+            exit 1
+            ;;
+    esac
+done
+
 echo "=== Cuckoo Trie Vectorization Benchmarks ===" | tee $RESULTS_FILE
 echo "Timestamp: $TIMESTAMP" | tee -a $RESULTS_FILE
 echo "Runs per test: $RUNS" | tee -a $RESULTS_FILE
