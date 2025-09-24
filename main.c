@@ -963,6 +963,7 @@ uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
 	const uint64_t all_valid_colors = (1ULL << (MAX_VALID_COLOR + 1)) - 1;
 	assert((used_colors & all_valid_colors) != all_valid_colors);   // There must be a free color
 	return __builtin_ctzll(~used_colors);
+#endif
 }
 
 typedef struct {
