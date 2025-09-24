@@ -899,7 +899,53 @@ void extend_jump_node(ct_entry* jump_node, uint64_t symbol) {
 	jump_node->child_color_and_jump_size++;
 }
 
+#ifdef USE_VECTORIZED_SEARCH
+uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) {
+	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors will overflow
+	
+	// Load headers from both buckets
+	__m256i headers1 = _mm256_set_epi64x(
+		*((uint64_t*)&bucket1->cells[3]),
+		*((uint64_t*)&bucket1->cells[2]),
+		*((uint64_t*)&bucket1->cells[1]),
+		*((uint64_t*)&bucket1->cells[0])
+	);
+	
+	__m256i headers2 = _mm256_set_epi64x(
+		*((uint64_t*)&bucket2->cells[3]),
+		*((uint64_t*)&bucket2->cells[2]),
+		*((uint64_t*)&bucket2->cells[1]),
+		*((uint64_t*)&bucket2->cells[0])
+	);
+	
+	// Extract color_and_tag field and shift to get color
+	__m256i color_mask = _mm256_set1_epi64x(0xFFULL << (8 * offsetof(ct_entry, color_and_tag)));
+	__m256i colors1 = _mm256_and_si256(headers1, color_mask);
+	__m256i colors2 = _mm256_and_si256(headers2, color_mask);
+	colors1 = _mm256_srli_epi64(colors1, (8 * offsetof(ct_entry, color_and_tag)) + TAG_BITS);
+	colors2 = _mm256_srli_epi64(colors2, (8 * offsetof(ct_entry, color_and_tag)) + TAG_BITS);
+	
+	// Extract to scalar and build bitmap using vectorized bit shifts
+	__m256i ones = _mm256_set1_epi64x(1ULL);
+	__m256i bits1 = _mm256_sllv_epi64(ones, colors1);  // 1ULL << c1[i] for each lane
+	__m256i bits2 = _mm256_sllv_epi64(ones, colors2);  // 1ULL << c2[i] for each lane
+	__m256i combined = _mm256_or_si256(bits1, bits2);
+	
+	// Horizontal OR to combine all lanes
+	uint64_t lanes[4];
+	_mm256_storeu_si256((__m256i*)lanes, combined);
+	uint64_t used_colors = lanes[0] | lanes[1] | lanes[2] | lanes[3];
+
+	const uint64_t all_valid_colors = (1ULL << (MAX_VALID_COLOR + 1)) - 1;
+	assert((used_colors & all_valid_colors) != all_valid_colors);
+	return __builtin_ctzll(~used_colors);
+}
+#endif
+
 uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
+#ifdef USE_VECTORIZED_SEARCH
+	return unused_color_in_pair_vectorized(bucket1, bucket2);
+#else
 	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors_will overflow
 	uint64_t used_colors = 0;
 	int i;
