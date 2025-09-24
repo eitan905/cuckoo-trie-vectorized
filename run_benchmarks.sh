@@ -40,7 +40,9 @@ rm -f /tmp/check_vectorization.c /tmp/check_vectorization
 
 echo | tee -a $RESULTS_FILE
 
-cd /local/home/eitansha/cuckoo-trie-vectorized
+# Use current directory or script directory
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "$SCRIPT_DIR"
 
 # Essential benchmarks for vectorization testing
 benchmarks=(
