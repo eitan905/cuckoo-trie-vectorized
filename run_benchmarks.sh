@@ -21,22 +21,13 @@ echo "=== Cuckoo Trie Vectorization Benchmarks ===" | tee $RESULTS_FILE
 echo "Timestamp: $TIMESTAMP" | tee -a $RESULTS_FILE
 echo "Runs per test: $RUNS" | tee -a $RESULTS_FILE
 
-# Check if vectorization is enabled
-cat > /tmp/check_vectorization.c << 'EOF'
-#include <stdio.h>
-int main() {
-#ifdef USE_VECTORIZED_SEARCH
-    printf("ENABLED\n");
-#else
-    printf("DISABLED\n");
-#endif
-    return 0;
-}
-EOF
-
-VECTORIZATION_STATUS=$(gcc -DUSE_VECTORIZED_SEARCH /tmp/check_vectorization.c -o /tmp/check_vectorization && /tmp/check_vectorization)
+# Check if vectorization is enabled by examining the Makefile
+if grep -q "\-DUSE_VECTORIZED_SEARCH" Makefile; then
+    VECTORIZATION_STATUS="ENABLED"
+else
+    VECTORIZATION_STATUS="DISABLED"
+fi
 echo "Vectorization: $VECTORIZATION_STATUS" | tee -a $RESULTS_FILE
-rm -f /tmp/check_vectorization.c /tmp/check_vectorization
 
 echo | tee -a $RESULTS_FILE
 

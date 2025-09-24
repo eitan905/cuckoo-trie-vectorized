@@ -230,13 +230,12 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 #endif
 
 	// Load first 8 bytes of each entry (covers the header fields we need)
-	const uint64_t* base64 = (const uint64_t*)&bucket->cells[0];
 	// _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
 	__m256i headers_vec = _mm256_set_epi64x(
-		base64[6],
-		base64[4],
-		base64[2],
-		base64[0]
+		*((uint64_t*)&bucket->cells[3]),  // cell[3] header
+		*((uint64_t*)&bucket->cells[2]),  // cell[2] header
+		*((uint64_t*)&bucket->cells[1]),  // cell[1] header
+		*((uint64_t*)&bucket->cells[0])   // cell[0] header
 	);
 
 	__m256i mask_vec = _mm256_set1_epi64x((long long)header_mask);
@@ -290,13 +289,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #endif
 
 	// Load first 8 bytes of each entry (covers the header fields we need)
-	const uint64_t* base64 = (const uint64_t*)&bucket->cells[0];
     // _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
     __m256i headers_vec = _mm256_set_epi64x(
-        base64[6],  // cell[3] header @ +48B
-        base64[4],  // cell[2] header @ +32B
-        base64[2],  // cell[1] header @ +16B
-        base64[0]   // cell[0] header @ +0B
+        *((uint64_t*)&bucket->cells[3]),  // cell[3] header
+        *((uint64_t*)&bucket->cells[2]),  // cell[2] header
+        *((uint64_t*)&bucket->cells[1]),  // cell[1] header
+        *((uint64_t*)&bucket->cells[0])   // cell[0] header
     );
 
     // 2) Broadcast mask/value to all 4 lanes.
