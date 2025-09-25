@@ -4,11 +4,17 @@
 #include <string.h>
 #include <stdint.h>
 #include <immintrin.h>
-#include "main.h"
+#include "config.h"
 #include "cuckoo_trie_internal.h"
+#include "atomics.h"
 
 #define ITERATIONS 10000000
 #define WARMUP_ITERATIONS 1000000
+
+// Forward declarations - these functions are defined in main.c but not in headers
+extern ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
+                                                                  ct_entry_local_copy* result, uint64_t is_secondary,
+                                                                  uint64_t tag, uint64_t color);
 
 // High-resolution timing
 static inline uint64_t rdtsc() {
@@ -53,10 +59,24 @@ int main() {
     
     // Initialize bucket with test data
     memset(bucket, 0, sizeof(ct_bucket));
+    
+    // Create entries with proper structure
     for (int i = 0; i < CUCKOO_BUCKET_SIZE; i++) {
-        bucket->cells[i].color_and_tag = (i << TAG_BITS) | i;
-        bucket->cells[i].parent_color_and_flags = 0;
-        bucket->cells[i].last_symbol = i;
+        ct_entry temp_entry;
+        memset(&temp_entry, 0, sizeof(ct_entry));
+        
+        // Set up entry 2 to match our search criteria
+        if (i == 2) {
+            temp_entry.color_and_tag = (2 << TAG_BITS) | 2;  // color=2, tag=2
+            temp_entry.parent_color_and_flags = 0;  // not secondary
+        } else {
+            temp_entry.color_and_tag = (i << TAG_BITS) | i;
+            temp_entry.parent_color_and_flags = 0;
+        }
+        temp_entry.last_symbol = i;
+        
+        // Copy to storage (only copy the non-padded part)
+        memcpy(&bucket->cells[i], &temp_entry, sizeof(ct_entry_storage));
     }
     
     uint64_t tag = 2;
@@ -64,7 +84,25 @@ int main() {
     uint64_t is_secondary = 0;
     
     printf("Microbenchmark: Vectorized vs Scalar find_entry_in_bucket_by_color\n");
-    printf("Iterations: %d, Warmup: %d\n\n", ITERATIONS, WARMUP_ITERATIONS);
+    printf("Bucket size: %d, Iterations: %d, Warmup: %d\n\n", 
+           CUCKOO_BUCKET_SIZE, ITERATIONS, WARMUP_ITERATIONS);
+    
+    // Verify both functions find the same result
+    ct_entry_local_copy scalar_result, vectorized_result;
+    ct_entry_storage* scalar_found = find_entry_in_bucket_by_color_scalar(bucket, &scalar_result, is_secondary, tag, color);
+    ct_entry_storage* vectorized_found = find_entry_in_bucket_by_color_vectorized(bucket, &vectorized_result, is_secondary, tag, color);
+    
+    if (scalar_found != vectorized_found) {
+        printf("ERROR: Functions return different results!\n");
+        printf("Scalar: %p, Vectorized: %p\n", (void*)scalar_found, (void*)vectorized_found);
+        return 1;
+    }
+    
+    if (scalar_found) {
+        printf("Both functions found entry at position %ld\n", scalar_found - &bucket->cells[0]);
+    } else {
+        printf("Both functions returned NULL (no match found)\n");
+    }
     
     // Warmup - Scalar
     for (int i = 0; i < WARMUP_ITERATIONS; i++) {
@@ -92,12 +130,15 @@ int main() {
     end = rdtsc();
     uint64_t vectorized_cycles = end - start;
     
-    printf("Results:\n");
+    printf("\nResults:\n");
     printf("Scalar version:     %lu cycles total, %.2f cycles/call\n", 
            scalar_cycles, (double)scalar_cycles / ITERATIONS);
     printf("Vectorized version: %lu cycles total, %.2f cycles/call\n", 
            vectorized_cycles, (double)vectorized_cycles / ITERATIONS);
-    printf("Speedup: %.2fx\n", (double)scalar_cycles / vectorized_cycles);
+    
+    if (vectorized_cycles > 0) {
+        printf("Speedup: %.2fx\n", (double)scalar_cycles / vectorized_cycles);
+    }
     
     free(bucket);
     return 0;
