@@ -36,5 +36,5 @@ test_debug: Makefile ${TEST_DEPS}
 benchmark: Makefile ${TEST_DEPS}
 	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ ${BENCHMARK_SOURCES} libcuckoo_trie.so -lpthread -lm
 
-microbenchmark: Makefile microbenchmark.c ${LIB_DEPS}
-	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -march=haswell -mavx2 -DUSE_VECTORIZED_SEARCH -o $@ microbenchmark.c ${LIB_SOURCES}
+microbenchmark: Makefile microbenchmark.c libcuckoo_trie.so
+	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -march=haswell -mavx2 -DUSE_VECTORIZED_SEARCH -Wl,-rpath=. -o $@ microbenchmark.c libcuckoo_trie.so
