@@ -205,17 +205,43 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 }
 
 // Global timing variables for scalar version
-static uint64_t scalar_total_cycles = 0;
-static uint64_t scalar_call_count = 0;
+static uint64_t scalar_by_color_total_cycles = 0;
+static uint64_t scalar_by_color_call_count = 0;
+static uint64_t scalar_by_parent_total_cycles = 0;
+static uint64_t scalar_by_parent_call_count = 0;
 
-// Global timing variables
-static uint64_t vectorized_total_cycles = 0;
-static uint64_t vectorized_call_count = 0;
+// Global timing variables for vectorized version
+static uint64_t vectorized_by_color_total_cycles = 0;
+static uint64_t vectorized_by_color_call_count = 0;
+static uint64_t vectorized_by_parent_total_cycles = 0;
+static uint64_t vectorized_by_parent_call_count = 0;
 
 static inline uint64_t rdtsc_timing() {
     uint32_t lo, hi;
     __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
     return ((uint64_t)hi << 32) | lo;
+}
+
+void ct_print_timing_stats() {
+#ifdef USE_VECTORIZED_SEARCH
+	if (vectorized_by_color_call_count > 0) {
+		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count);
+	}
+	if (vectorized_by_parent_call_count > 0) {
+		printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count);
+	}
+#else
+	if (scalar_by_color_call_count > 0) {
+		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average\n", 
+		       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count);
+	}
+	if (scalar_by_parent_call_count > 0) {
+		printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average\n", 
+		       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count);
+	}
+#endif
 }
 
 #ifdef USE_VECTORIZED_SEARCH
@@ -336,8 +362,8 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	vectorized_total_cycles += (rdtsc_timing() - start_cycles);
-	vectorized_call_count++;
+	vectorized_by_color_total_cycles += (rdtsc_timing() - start_cycles);
+	vectorized_by_color_call_count++;
 	
 	return result->last_pos;
 }
@@ -397,8 +423,8 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	scalar_total_cycles += (rdtsc_timing() - start_cycles);
-	scalar_call_count++;
+	scalar_by_color_total_cycles += (rdtsc_timing() - start_cycles);
+	scalar_by_color_call_count++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -412,6 +438,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 #ifdef USE_VECTORIZED_SEARCH
 	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
 #else
+	uint64_t start_cycles = rdtsc_timing();
 	int i;
 
 	uint64_t header_mask = 0;
@@ -463,6 +490,10 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 #endif
 
 	result->last_pos = &(bucket->cells[i]);
+	
+	scalar_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
+	scalar_by_parent_call_count++;
+	
 	if (!result->last_pos)
 		__builtin_unreachable();
 	return result->last_pos;
@@ -2517,14 +2548,22 @@ cuckoo_trie* ct_alloc(uint64_t num_cells) {
 
 void ct_free(cuckoo_trie* trie) {
 #ifdef USE_VECTORIZED_SEARCH
-	if (vectorized_call_count > 0) {
-		printf("Vectorized function timing: %lu calls, %.2f cycles/call average\n", 
-		       vectorized_call_count, (double)vectorized_total_cycles / vectorized_call_count);
+	if (vectorized_by_color_call_count > 0) {
+		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count);
+	}
+	if (vectorized_by_parent_call_count > 0) {
+		printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count);
 	}
 #else
-	if (scalar_call_count > 0) {
-		printf("Scalar function timing: %lu calls, %.2f cycles/call average\n", 
-		       scalar_call_count, (double)scalar_total_cycles / scalar_call_count);
+	if (scalar_by_color_call_count > 0) {
+		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average\n", 
+		       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count);
+	}
+	if (scalar_by_parent_call_count > 0) {
+		printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average\n", 
+		       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count);
 	}
 #endif
 	uint64_t buckets_pages = (trie->num_buckets * sizeof(ct_bucket)) / HUGEPAGE_SIZE + 1;
