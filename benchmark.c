@@ -258,6 +258,8 @@ void bench_pos_lookup(dataset_t* dataset, uint64_t trie_size) {
 	}
 	timer_report(&timer, num_lookups);
 	notify_critical_section_end();
+	
+	ct_free(trie);
 }
 
 typedef struct {
