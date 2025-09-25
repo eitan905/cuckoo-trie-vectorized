@@ -218,13 +218,6 @@ static inline uint64_t rdtsc_timing() {
     return ((uint64_t)hi << 32) | lo;
 }
 
-#define VECTORIZED_TIMING_END_AND_RETURN(retval) do { \
-    uint64_t end_cycles = rdtsc_timing(); \
-    vectorized_total_cycles += (end_cycles - start_cycles); \
-    vectorized_call_count++; \
-    return (retval); \
-} while(0)
-
 #ifdef USE_VECTORIZED_SEARCH
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 														  ct_entry_local_copy* result, uint64_t is_secondary,
@@ -285,6 +278,7 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 														   ct_entry_local_copy* result, uint64_t is_secondary,
 														   uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+	uint64_t start_cycles = rdtsc_timing();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
