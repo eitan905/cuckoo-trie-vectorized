@@ -5,7 +5,7 @@ TEST_SOURCES=test.c random.c dataset.c util.c
 TEST_DEPS=${TEST_SOURCES} cuckoo_trie.h random.h key_object.h dataset.h util.h
 BENCHMARK_SOURCES=benchmark.c random.c dataset.c util.c random_dist.c
 BENCHMARK_DEPS=${BENCHMARK_SOURCES} random.h cuckoo_trie.h dataset.h cuckoo_trie_internal.h util.h
-BINARIES=libcuckoo_trie.so libcuckoo_trie_debug.so test test_debug benchmark
+BINARIES=libcuckoo_trie.so libcuckoo_trie_debug.so test test_debug benchmark microbenchmark
 
 # Without -fvisibility=hidden gcc assumes that all functions are exported and usually
 # won't inline them
@@ -22,7 +22,7 @@ clean:
 	rm -f ${BINARIES}
 
 libcuckoo_trie.so: Makefile ${LIB_DEPS}
-	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -fPIC -shared -march=haswell -mavx2 -DNDEBUG -DUSE_VECTORIZED_SEARCH -o $@ ${LIB_SOURCES}
+	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -fPIC -shared -march=haswell -mavx2 -DNDEBUG $(VECTORIZED) -o $@ ${LIB_SOURCES}
 
 libcuckoo_trie_debug.so: Makefile ${LIB_DEPS}
 	${CC} ${FLAGS} -O1 -fPIC -shared -march=haswell -mavx2 -g -DUSE_VECTORIZED_SEARCH -o $@ ${LIB_SOURCES}
@@ -35,3 +35,6 @@ test_debug: Makefile ${TEST_DEPS}
 
 benchmark: Makefile ${TEST_DEPS}
 	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ ${BENCHMARK_SOURCES} libcuckoo_trie.so -lpthread -lm
+
+microbenchmark: Makefile microbenchmark.c ${LIB_DEPS}
+	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -march=haswell -mavx2 -DUSE_VECTORIZED_SEARCH -o $@ microbenchmark.c ${LIB_SOURCES}
