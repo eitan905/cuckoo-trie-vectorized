@@ -5,7 +5,7 @@ TEST_SOURCES=test.c random.c dataset.c util.c
 TEST_DEPS=${TEST_SOURCES} cuckoo_trie.h random.h key_object.h dataset.h util.h
 BENCHMARK_SOURCES=benchmark.c random.c dataset.c util.c random_dist.c
 BENCHMARK_DEPS=${BENCHMARK_SOURCES} random.h cuckoo_trie.h dataset.h cuckoo_trie_internal.h util.h
-BINARIES=libcuckoo_trie.so libcuckoo_trie_debug.so test test_debug benchmark microbenchmark
+BINARIES=libcuckoo_trie.so libcuckoo_trie_debug.so test test_debug benchmark
 
 # Without -fvisibility=hidden gcc assumes that all functions are exported and usually
 # won't inline them
@@ -35,6 +35,3 @@ test_debug: Makefile ${TEST_DEPS}
 
 benchmark: Makefile ${TEST_DEPS}
 	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ ${BENCHMARK_SOURCES} libcuckoo_trie.so -lpthread -lm
-
-microbenchmark: Makefile microbenchmark.c libcuckoo_trie.so
-	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -march=haswell -mavx2 -DUSE_VECTORIZED_SEARCH -Wl,-rpath=. -o $@ microbenchmark.c libcuckoo_trie.so

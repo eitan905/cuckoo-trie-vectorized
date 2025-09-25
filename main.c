@@ -204,10 +204,21 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 	}
 }
 
+// Global timing variables
+static uint64_t vectorized_total_cycles = 0;
+static uint64_t vectorized_call_count = 0;
+
+static inline uint64_t rdtsc_timing() {
+    uint32_t lo, hi;
+    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
 #ifdef USE_VECTORIZED_SEARCH
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 														  ct_entry_local_copy* result, uint64_t is_secondary,
 														  uint64_t tag, uint64_t color) {
+	uint64_t start_cycles = rdtsc_timing();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -319,6 +330,11 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #endif
 
 	result->last_pos = &(bucket->cells[i]);
+	
+	uint64_t end_cycles = rdtsc_timing();
+	vectorized_total_cycles += (end_cycles - start_cycles);
+	vectorized_call_count++;
+	
 	return result->last_pos;
 }
 #endif
@@ -2491,6 +2507,12 @@ cuckoo_trie* ct_alloc(uint64_t num_cells) {
 }
 
 void ct_free(cuckoo_trie* trie) {
+#ifdef USE_VECTORIZED_SEARCH
+	if (vectorized_call_count > 0) {
+		printf("Vectorized function timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_call_count, (double)vectorized_total_cycles / vectorized_call_count);
+	}
+#endif
 	uint64_t buckets_pages = (trie->num_buckets * sizeof(ct_bucket)) / HUGEPAGE_SIZE + 1;
 	munmap(trie->buckets, buckets_pages * HUGEPAGE_SIZE);
 	free(trie);
