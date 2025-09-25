@@ -298,6 +298,10 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 #endif
 
 	result->last_pos = &(bucket->cells[i]);
+	
+	vectorized_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
+	vectorized_by_parent_call_count++;
+	
 	return result->last_pos;
 }
 
