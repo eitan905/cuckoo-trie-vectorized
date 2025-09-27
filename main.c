@@ -244,7 +244,6 @@ void ct_print_timing_stats() {
 #endif
 }
 
-#ifdef USE_VECTORIZED_SEARCH
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 														  ct_entry_local_copy* result, uint64_t is_secondary,
 														  uint64_t tag, uint64_t color) {
@@ -299,8 +298,8 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	vectorized_by_color_total_cycles += (rdtsc_timing() - start_cycles);
-	vectorized_by_color_call_count++;
+	// vectorized_by_color_total_cycles += (rdtsc_timing() - start_cycles);
+	// vectorized_by_color_call_count++;
 	
 	return result->last_pos;
 }
@@ -366,12 +365,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	vectorized_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
-	vectorized_by_parent_call_count++;
+	// vectorized_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
+	// vectorized_by_parent_call_count++;
 	
 	return result->last_pos;
 }
-#endif
+
 
 ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
@@ -495,8 +494,8 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	scalar_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
-	scalar_by_parent_call_count++;
+	// scalar_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
+	// scalar_by_parent_call_count++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -587,7 +586,7 @@ ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket) {
 #endif
 
 ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
-#ifdef USE_VECTORIZED_SEARCH
+#ifdef USE_VECTORIZED_SEARCHH
 	return find_free_cell_in_bucket_vectorized(bucket);
 #else
 	int i;
@@ -959,7 +958,6 @@ void extend_jump_node(ct_entry* jump_node, uint64_t symbol) {
 	jump_node->child_color_and_jump_size++;
 }
 
-#ifdef USE_VECTORIZED_SEARCH
 uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) {
 	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors will overflow
 	
@@ -1000,10 +998,9 @@ uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) 
 	assert((used_colors & all_valid_colors) != all_valid_colors);
 	return __builtin_ctzll(~used_colors);
 }
-#endif
 
 uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
-#ifdef USE_VECTORIZED_SEARCH
+#ifdef USE_VECTORIZED_SEARCHH
 	return unused_color_in_pair_vectorized(bucket1, bucket2);
 #else
 	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors_will overflow
@@ -2476,7 +2473,7 @@ void init_buckets(cuckoo_trie* trie) {
 	uint64_t bucket_num;
 
 	for (bucket_num = 0; bucket_num < trie->num_buckets; bucket_num++) {
-#ifdef USE_VECTORIZED_SEARCH
+#ifdef USE_VECTORIZED_SEARCHH
 		// Initialize all entries in the bucket using vectorized stores
 		const ct_entry unused_entry = {
 			.parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED,

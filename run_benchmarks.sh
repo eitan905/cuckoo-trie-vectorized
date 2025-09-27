@@ -40,12 +40,13 @@ benchmarks=(
     "pos-lookup"
     "mt-pos-lookup --threads 4"
     "mt-pos-lookup --threads 8"
-    "ycsb-b"
     "ycsb-c"
+    "ycsb-d"
     "insert"
+    "range-read"
 )
 
-key_sizes=("rand-8" "rand-16" "rand-32")
+key_sizes=("rand-8")
 
 declare -A results
 
