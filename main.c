@@ -5,6 +5,7 @@
 #include <sys/mman.h>
 #include <stdio.h>
 #include <immintrin.h>
+#include <cpuid.h>
 
 #include "cuckoo_trie.h"
 #include "random.h"
@@ -14,6 +15,38 @@
 // The root has to have a last symbol in order to have an alternate bucket.
 // The following value was arbitrarily chosen.
 #define ROOT_LAST_SYMBOL 0
+
+// Runtime vectorization selection
+static int use_vectorized_search = -1; // -1 = auto-detect, 0 = scalar, 1 = vectorized
+
+// Function declarations for vectorized implementations
+ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
+                                                          ct_entry_local_copy* result, uint64_t is_secondary,
+                                                          uint64_t tag, uint64_t color);
+ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
+                                                           ct_entry_local_copy* result, uint64_t is_secondary,
+                                                           uint64_t tag, uint64_t last_symbol, uint64_t parent_color);
+ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket);
+uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2);
+
+// CPU feature detection
+static int cpu_supports_avx2(void) {
+    unsigned int eax, ebx, ecx, edx;
+    if (__get_cpuid_max(0, NULL) < 7) return 0;
+    __cpuid_count(7, 0, eax, ebx, ecx, edx);
+    return (ebx & (1 << 5)) != 0; // AVX2 bit
+}
+
+static void init_vectorization_mode(void) {
+    if (use_vectorized_search == -1) {
+        char* env_var = getenv("CUCKOO_TRIE_VECTORIZED");
+        if (env_var) {
+            use_vectorized_search = atoi(env_var);
+        } else {
+            use_vectorized_search = cpu_supports_avx2();
+        }
+    }
+}
 
 // Children of jump nodes (and the root) use this as parent_color, so that
 // they aren't mistakenly considered children of bitmap nodes.
@@ -223,31 +256,33 @@ static inline uint64_t rdtsc_timing() {
 }
 
 void ct_print_timing_stats() {
-#ifdef USE_VECTORIZED_SEARCH
-	if (vectorized_by_color_call_count > 0) {
-		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
-		       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count);
+	init_vectorization_mode();
+	
+	if (use_vectorized_search) {
+		if (vectorized_by_color_call_count > 0) {
+			printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
+			       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count);
+		}
+		if (vectorized_by_parent_call_count > 0) {
+			printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average\n", 
+			       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count);
+		}
+	} else {
+		if (scalar_by_color_call_count > 0) {
+			printf("Scalar by_color timing: %lu calls, %.2f cycles/call average\n", 
+			       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count);
+		}
+		if (scalar_by_parent_call_count > 0) {
+			printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average\n", 
+			       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count);
+		}
 	}
-	if (vectorized_by_parent_call_count > 0) {
-		printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average\n", 
-		       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count);
-	}
-#else
-	if (scalar_by_color_call_count > 0) {
-		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average\n", 
-		       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count);
-	}
-	if (scalar_by_parent_call_count > 0) {
-		printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average\n", 
-		       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count);
-	}
-#endif
 }
 
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 														  ct_entry_local_copy* result, uint64_t is_secondary,
 														  uint64_t tag, uint64_t color) {
-	// uint64_t start_cycles = rdtsc_timing();
+	uint64_t start_cycles = rdtsc_timing();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -307,7 +342,7 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 														   ct_entry_local_copy* result, uint64_t is_secondary,
 														   uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	// uint64_t start_cycles = rdtsc_timing();
+	uint64_t start_cycles = rdtsc_timing();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -375,10 +410,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
-#ifdef USE_VECTORIZED_SEARCH
-	return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
-#else
-	// uint64_t start_cycles = rdtsc_timing();
+	init_vectorization_mode();
+	
+	if (use_vectorized_search) {
+		return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
+	} else {
+	uint64_t start_cycles = rdtsc_timing();
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -426,22 +463,24 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// scalar_by_color_total_cycles += (rdtsc_timing() - start_cycles);
-	// scalar_by_color_call_count++;
+	scalar_by_color_total_cycles += (rdtsc_timing() - start_cycles);
+	scalar_by_color_call_count++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
 	return result->last_pos;
-#endif
+	}
 }
 
 ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 												 ct_entry_local_copy* result, uint64_t is_secondary,
 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-#ifdef USE_VECTORIZED_SEARCH
-	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
-#else
-	// uint64_t start_cycles = rdtsc_timing();
+	init_vectorization_mode();
+	
+	if (use_vectorized_search) {
+		return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
+	} else {
+	uint64_t start_cycles = rdtsc_timing();
 	int i;
 
 	uint64_t header_mask = 0;
@@ -500,7 +539,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	if (!result->last_pos)
 		__builtin_unreachable();
 	return result->last_pos;
-#endif
+	}
 }
 
 // Searches for an entry with color <color> in the specified pair. Copies the entry
@@ -562,7 +601,6 @@ ct_entry_storage* find_entry_in_pair_by_parent(cuckoo_trie* trie, ct_entry_local
 	return entry_addr;
 }
 
-#ifdef USE_VECTORIZED_SEARCH
 ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket) {
 	// Load first 8 bytes of each entry (covers type field)
 	__m256i headers_vec = _mm256_set_epi64x(
@@ -583,12 +621,13 @@ ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket) {
 	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
 	return (i == CUCKOO_BUCKET_SIZE) ? NULL : &(bucket->cells[i]);
 }
-#endif
 
 ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
-#ifdef USE_VECTORIZED_SEARCHH
-	return find_free_cell_in_bucket_vectorized(bucket);
-#else
+	init_vectorization_mode();
+	
+	if (use_vectorized_search) {
+		return find_free_cell_in_bucket_vectorized(bucket);
+	} else {
 	int i;
 
 	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
@@ -598,7 +637,7 @@ ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
 	}
 
 	return NULL;
-#endif
+	}
 }
 
 ct_entry_storage* find_root(cuckoo_trie* trie, ct_entry_local_copy* result) {
@@ -1000,9 +1039,11 @@ uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) 
 }
 
 uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
-#ifdef USE_VECTORIZED_SEARCHH
-	return unused_color_in_pair_vectorized(bucket1, bucket2);
-#else
+	init_vectorization_mode();
+	
+	if (use_vectorized_search) {
+		return unused_color_in_pair_vectorized(bucket1, bucket2);
+	} else {
 	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors_will overflow
 	uint64_t used_colors = 0;
 	int i;
@@ -1020,7 +1061,7 @@ uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
 	const uint64_t all_valid_colors = (1ULL << (MAX_VALID_COLOR + 1)) - 1;
 	assert((used_colors & all_valid_colors) != all_valid_colors);   // There must be a free color
 	return __builtin_ctzll(~used_colors);
-#endif
+	}
 }
 
 typedef struct {
@@ -2471,27 +2512,28 @@ ct_iter* ct_iter_alloc(cuckoo_trie* trie) {
 
 void init_buckets(cuckoo_trie* trie) {
 	uint64_t bucket_num;
+	init_vectorization_mode();
 
 	for (bucket_num = 0; bucket_num < trie->num_buckets; bucket_num++) {
-#ifdef USE_VECTORIZED_SEARCHH
-		// Initialize all entries in the bucket using vectorized stores
-		const ct_entry unused_entry = {
-			.parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED,
-			.color_and_tag = INVALID_COLOR << TAG_BITS
-		};
-		
-		// Replicate the unused entry pattern across all 4 cells
-		for (int i = 0; i < CUCKOO_BUCKET_SIZE; i++) {
-			memcpy(&trie->buckets[bucket_num].cells[i], &unused_entry, sizeof(ct_entry_storage));
+		if (use_vectorized_search) {
+			// Initialize all entries in the bucket using vectorized stores
+			const ct_entry unused_entry = {
+				.parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED,
+				.color_and_tag = INVALID_COLOR << TAG_BITS
+			};
+			
+			// Replicate the unused entry pattern across all 4 cells
+			for (int i = 0; i < CUCKOO_BUCKET_SIZE; i++) {
+				memcpy(&trie->buckets[bucket_num].cells[i], &unused_entry, sizeof(ct_entry_storage));
+			}
+		} else {
+			int i;
+			for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
+				ct_entry_storage* entry = &(trie->buckets[bucket_num].cells[i]);
+				((ct_entry*) entry)->parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED;
+				((ct_entry*) entry)->color_and_tag = INVALID_COLOR << TAG_BITS;
+			}
 		}
-#else
-		int i;
-		for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-			ct_entry_storage* entry = &(trie->buckets[bucket_num].cells[i]);
-			((ct_entry*) entry)->parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED;
-			((ct_entry*) entry)->color_and_tag = INVALID_COLOR << TAG_BITS;
-		}
-#endif
 		trie->buckets[bucket_num].write_lock_and_seq = 0;
 	}
 }
@@ -2548,25 +2590,27 @@ cuckoo_trie* ct_alloc(uint64_t num_cells) {
 }
 
 void ct_free(cuckoo_trie* trie) {
-#ifdef USE_VECTORIZED_SEARCH
-	if (vectorized_by_color_call_count > 0) {
-		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
-		       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count);
+	init_vectorization_mode();
+	
+	if (use_vectorized_search) {
+		if (vectorized_by_color_call_count > 0) {
+			printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
+			       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count);
+		}
+		if (vectorized_by_parent_call_count > 0) {
+			printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average\n", 
+			       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count);
+		}
+	} else {
+		if (scalar_by_color_call_count > 0) {
+			printf("Scalar by_color timing: %lu calls, %.2f cycles/call average\n", 
+			       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count);
+		}
+		if (scalar_by_parent_call_count > 0) {
+			printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average\n", 
+			       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count);
+		}
 	}
-	if (vectorized_by_parent_call_count > 0) {
-		printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average\n", 
-		       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count);
-	}
-#else
-	if (scalar_by_color_call_count > 0) {
-		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average\n", 
-		       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count);
-	}
-	if (scalar_by_parent_call_count > 0) {
-		printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average\n", 
-		       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count);
-	}
-#endif
 	uint64_t buckets_pages = (trie->num_buckets * sizeof(ct_bucket)) / HUGEPAGE_SIZE + 1;
 	munmap(trie->buckets, buckets_pages * HUGEPAGE_SIZE);
 	free(trie);
