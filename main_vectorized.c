@@ -4,6 +4,8 @@
 #include <stddef.h>
 #include <sys/mman.h>
 #include <stdio.h>
+#include <immintrin.h>
+#include <cpuid.h>
 
 #include "cuckoo_trie.h"
 #include "random.h"
@@ -13,6 +15,8 @@
 // The root has to have a last symbol in order to have an alternate bucket.
 // The following value was arbitrarily chosen.
 #define ROOT_LAST_SYMBOL 0
+
+// Vectorized-only implementation - no runtime branching
 
 // Children of jump nodes (and the root) use this as parent_color, so that
 // they aren't mistakenly considered children of bitmap nodes.
@@ -203,10 +207,33 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 	}
 }
 
-ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
-												ct_entry_local_copy* result, uint64_t is_secondary,
-												uint64_t tag, uint64_t color) {
-	int i;
+// Global timing variables for vectorized version
+static uint64_t vectorized_by_color_total_cycles = 0;
+static uint64_t vectorized_by_color_call_count = 0;
+static uint64_t vectorized_by_parent_total_cycles = 0;
+static uint64_t vectorized_by_parent_call_count = 0;
+
+static inline uint64_t rdtsc_timing() {
+    uint32_t lo, hi;
+    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
+    return ((uint64_t)hi << 32) | lo;
+}
+
+void ct_print_timing_stats() {
+	if (vectorized_by_color_call_count > 0) {
+		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count);
+	}
+	if (vectorized_by_parent_call_count > 0) {
+		printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count);
+	}
+}
+
+ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
+														  ct_entry_local_copy* result, uint64_t is_secondary,
+														  uint64_t tag, uint64_t color) {
+	uint64_t start_cycles = rdtsc_timing();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -223,41 +250,50 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 #ifdef MULTITHREADING
 	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
 	if (start_counter & SEQ_INCREMENT)
-		return NULL;   // Bucket is being written. The retry loop will call us again.
+		return NULL;
 #else
 	assert(bucket->write_lock_and_seq == 0);
 #endif
 
-	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-		read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+	// Load first 8 bytes of each entry (covers the header fields we need)
+	// _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
+	__m256i headers_vec = _mm256_set_epi64x(
+		*((uint64_t*)&bucket->cells[3]),  // cell[3] header
+		*((uint64_t*)&bucket->cells[2]),  // cell[2] header
+		*((uint64_t*)&bucket->cells[1]),  // cell[1] header
+		*((uint64_t*)&bucket->cells[0])   // cell[0] header
+	);
 
-		uint64_t header = *((uint64_t*) (&(result->value)));
-		if ((header & header_mask) == header_values)
-			break;
-	}
+	__m256i mask_vec = _mm256_set1_epi64x((long long)header_mask);
+	__m256i values_vec = _mm256_set1_epi64x((long long)header_values);
+	__m256i masked = _mm256_and_si256(headers_vec, mask_vec);
+	__m256i cmp = _mm256_cmpeq_epi64(masked, values_vec);
+	int mask = _mm256_movemask_epi8(cmp);
+	
+	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
 	if (i == CUCKOO_BUCKET_SIZE)
 		return NULL;
 
+	read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+
 #ifdef MULTITHREADING
-	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
-		// The bucket changed while we read it. We rely on the retry loop in
-		// find_entry_in_pair_by_color to call us again
+	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
 		return NULL;
-	}
 	result->last_seq = start_counter;
 #endif
 
 	result->last_pos = &(bucket->cells[i]);
-	if (!result->last_pos)
-		__builtin_unreachable();
+	
+	vectorized_by_color_total_cycles += (rdtsc_timing() - start_cycles);
+	vectorized_by_color_call_count++;
+	
 	return result->last_pos;
 }
 
-ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
-												 ct_entry_local_copy* result, uint64_t is_secondary,
-												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	int i;
-
+ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
+														   ct_entry_local_copy* result, uint64_t is_secondary,
+														   uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+	uint64_t start_cycles = rdtsc_timing();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -278,38 +314,60 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 #ifdef MULTITHREADING
 	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
 	if (start_counter & SEQ_INCREMENT)
-		return NULL;   // Bucket is being written. The retry loop will call us again.
+		return NULL;
 #else
 	assert(bucket->write_lock_and_seq == 0);
 #endif
 
-	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-		read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+	// Load first 8 bytes of each entry (covers the header fields we need)
+    // _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
+    __m256i headers_vec = _mm256_set_epi64x(
+        *((uint64_t*)&bucket->cells[3]),  // cell[3] header
+        *((uint64_t*)&bucket->cells[2]),  // cell[2] header
+        *((uint64_t*)&bucket->cells[1]),  // cell[1] header
+        *((uint64_t*)&bucket->cells[0])   // cell[0] header
+    );
 
-		uint64_t header = *((uint64_t*) (&(result->value)));
-		if ((header & header_mask) == header_values) {
-			assert(entry_type(&(result->value)) != TYPE_UNUSED);
-			break;
-		}
-	}
+    // 2) Broadcast mask/value to all 4 lanes.
+    __m256i mask_vec   = _mm256_set1_epi64x((long long)header_mask);
+    __m256i values_vec = _mm256_set1_epi64x((long long)header_values);
 
-	if (i == CUCKOO_BUCKET_SIZE) {
+    // 3) (header & mask) == value, per lane, then compress result to a byte mask.
+    __m256i masked = _mm256_and_si256(headers_vec, mask_vec);
+    __m256i cmp    = _mm256_cmpeq_epi64(masked, values_vec);
+    int     mask   = _mm256_movemask_epi8(cmp);
+	
+	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
+	if (i == CUCKOO_BUCKET_SIZE)
 		return NULL;
-	}
+
+	read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
 
 #ifdef MULTITHREADING
-	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
-		// The bucket changed while we read it. We rely on the retry loop in
-		// find_entry_in_pair_by_parent to call us again
+	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
 		return NULL;
-	}
 	result->last_seq = start_counter;
 #endif
 
 	result->last_pos = &(bucket->cells[i]);
-	if (!result->last_pos)
-		__builtin_unreachable();
+	
+	vectorized_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
+	vectorized_by_parent_call_count++;
+	
 	return result->last_pos;
+}
+
+
+ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
+												ct_entry_local_copy* result, uint64_t is_secondary,
+												uint64_t tag, uint64_t color) {
+	return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
+}
+
+ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
+												 ct_entry_local_copy* result, uint64_t is_secondary,
+												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
 }
 
 // Searches for an entry with color <color> in the specified pair. Copies the entry
@@ -371,16 +429,29 @@ ct_entry_storage* find_entry_in_pair_by_parent(cuckoo_trie* trie, ct_entry_local
 	return entry_addr;
 }
 
+ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket) {
+	// Load first 8 bytes of each entry (covers type field)
+	__m256i headers_vec = _mm256_set_epi64x(
+		*((uint64_t*)&bucket->cells[3]),
+		*((uint64_t*)&bucket->cells[2]),
+		*((uint64_t*)&bucket->cells[1]),
+		*((uint64_t*)&bucket->cells[0])
+	);
+
+	// Create mask for TYPE_UNUSED using TYPE_MASK
+	__m256i type_mask = _mm256_set1_epi64x(TYPE_MASK);
+	__m256i unused_val = _mm256_set1_epi64x(TYPE_UNUSED);
+	
+	__m256i masked = _mm256_and_si256(headers_vec, type_mask);
+	__m256i cmp = _mm256_cmpeq_epi64(masked, unused_val);
+	int mask = _mm256_movemask_epi8(cmp);
+	
+	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
+	return (i == CUCKOO_BUCKET_SIZE) ? NULL : &(bucket->cells[i]);
+}
+
 ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
-	int i;
-
-	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-		ct_entry_storage* entry = &(bucket->cells[i]);
-		if (entry_type((ct_entry*) entry) == TYPE_UNUSED)
-			return entry;
-	}
-
-	return NULL;
+	return find_free_cell_in_bucket_vectorized(bucket);
 }
 
 ct_entry_storage* find_root(cuckoo_trie* trie, ct_entry_local_copy* result) {
@@ -740,24 +811,49 @@ void extend_jump_node(ct_entry* jump_node, uint64_t symbol) {
 	jump_node->child_color_and_jump_size++;
 }
 
-uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
-	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors_will overflow
-	uint64_t used_colors = 0;
-	int i;
-
-	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-		ct_entry_storage* entry = &(bucket1->cells[i]);
-
-		// Turn on the bit corresponding to the entry's color.
-		used_colors |= 1ULL << entry_color((ct_entry*) entry);
-
-		entry = &(bucket2->cells[i]);
-		used_colors |= 1ULL << entry_color((ct_entry*) entry);
-	}
+uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) {
+	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors will overflow
+	
+	// Load headers from both buckets
+	__m256i headers1 = _mm256_set_epi64x(
+		*((uint64_t*)&bucket1->cells[3]),
+		*((uint64_t*)&bucket1->cells[2]),
+		*((uint64_t*)&bucket1->cells[1]),
+		*((uint64_t*)&bucket1->cells[0])
+	);
+	
+	__m256i headers2 = _mm256_set_epi64x(
+		*((uint64_t*)&bucket2->cells[3]),
+		*((uint64_t*)&bucket2->cells[2]),
+		*((uint64_t*)&bucket2->cells[1]),
+		*((uint64_t*)&bucket2->cells[0])
+	);
+	
+	// Extract color_and_tag field and shift to get color
+	__m256i color_mask = _mm256_set1_epi64x(0xFFULL << (8 * offsetof(ct_entry, color_and_tag)));
+	__m256i colors1 = _mm256_and_si256(headers1, color_mask);
+	__m256i colors2 = _mm256_and_si256(headers2, color_mask);
+	colors1 = _mm256_srli_epi64(colors1, (8 * offsetof(ct_entry, color_and_tag)) + TAG_BITS);
+	colors2 = _mm256_srli_epi64(colors2, (8 * offsetof(ct_entry, color_and_tag)) + TAG_BITS);
+	
+	// Extract to scalar and build bitmap using vectorized bit shifts
+	__m256i ones = _mm256_set1_epi64x(1ULL);
+	__m256i bits1 = _mm256_sllv_epi64(ones, colors1);  // 1ULL << c1[i] for each lane
+	__m256i bits2 = _mm256_sllv_epi64(ones, colors2);  // 1ULL << c2[i] for each lane
+	__m256i combined = _mm256_or_si256(bits1, bits2);
+	
+	// Horizontal OR to combine all lanes
+	uint64_t lanes[4];
+	_mm256_storeu_si256((__m256i*)lanes, combined);
+	uint64_t used_colors = lanes[0] | lanes[1] | lanes[2] | lanes[3];
 
 	const uint64_t all_valid_colors = (1ULL << (MAX_VALID_COLOR + 1)) - 1;
-	assert((used_colors & all_valid_colors) != all_valid_colors);   // There must be a free color
+	assert((used_colors & all_valid_colors) != all_valid_colors);
 	return __builtin_ctzll(~used_colors);
+}
+
+uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
+	return unused_color_in_pair_vectorized(bucket1, bucket2);
 }
 
 typedef struct {
@@ -2210,11 +2306,15 @@ void init_buckets(cuckoo_trie* trie) {
 	uint64_t bucket_num;
 
 	for (bucket_num = 0; bucket_num < trie->num_buckets; bucket_num++) {
-		int i;
-		for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-			ct_entry_storage* entry = &(trie->buckets[bucket_num].cells[i]);
-			((ct_entry*) entry)->parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED;
-			((ct_entry*) entry)->color_and_tag = INVALID_COLOR << TAG_BITS;
+		// Initialize all entries in the bucket using vectorized stores
+		const ct_entry unused_entry = {
+			.parent_color_and_flags = (INVALID_COLOR << PARENT_COLOR_SHIFT) | TYPE_UNUSED,
+			.color_and_tag = INVALID_COLOR << TAG_BITS
+		};
+		
+		// Replicate the unused entry pattern across all 4 cells
+		for (int i = 0; i < CUCKOO_BUCKET_SIZE; i++) {
+			memcpy(&trie->buckets[bucket_num].cells[i], &unused_entry, sizeof(ct_entry_storage));
 		}
 		trie->buckets[bucket_num].write_lock_and_seq = 0;
 	}
@@ -2272,6 +2372,14 @@ cuckoo_trie* ct_alloc(uint64_t num_cells) {
 }
 
 void ct_free(cuckoo_trie* trie) {
+	if (vectorized_by_color_call_count > 0) {
+		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count);
+	}
+	if (vectorized_by_parent_call_count > 0) {
+		printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average\n", 
+		       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count);
+	}
 	uint64_t buckets_pages = (trie->num_buckets * sizeof(ct_bucket)) / HUGEPAGE_SIZE + 1;
 	munmap(trie->buckets, buckets_pages * HUGEPAGE_SIZE);
 	free(trie);
