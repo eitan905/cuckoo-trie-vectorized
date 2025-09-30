@@ -25,7 +25,7 @@ libcuckoo_trie.so: Makefile ${LIB_DEPS}
 	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -fPIC -shared -march=haswell -mavx2 -DNDEBUG $(VECTORIZED) -o $@ ${LIB_SOURCES}
 
 libcuckoo_trie_debug.so: Makefile ${LIB_DEPS}
-	${CC} ${FLAGS} -O1 -fPIC -shared -march=haswell -mavx2 -g -DUSE_VECTORIZED_SEARCH -o $@ ${LIB_SOURCES}
+	${CC} ${FLAGS} -O1 -fPIC -shared -march=haswell -mavx2 -g $(VECTORIZED) -o $@ ${LIB_SOURCES}
 
 test: Makefile ${TEST_DEPS}
 	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ ${TEST_SOURCES} libcuckoo_trie.so -lpthread

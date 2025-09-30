@@ -247,7 +247,7 @@ void ct_print_timing_stats() {
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 														  ct_entry_local_copy* result, uint64_t is_secondary,
 														  uint64_t tag, uint64_t color) {
-	uint64_t start_cycles = rdtsc_timing();
+	// uint64_t start_cycles = rdtsc_timing();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -307,7 +307,7 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 														   ct_entry_local_copy* result, uint64_t is_secondary,
 														   uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	uint64_t start_cycles = rdtsc_timing();
+	// uint64_t start_cycles = rdtsc_timing();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -378,7 +378,7 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 #ifdef USE_VECTORIZED_SEARCH
 	return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
 #else
-	uint64_t start_cycles = rdtsc_timing();
+	// uint64_t start_cycles = rdtsc_timing();
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -426,8 +426,8 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	scalar_by_color_total_cycles += (rdtsc_timing() - start_cycles);
-	scalar_by_color_call_count++;
+	// scalar_by_color_total_cycles += (rdtsc_timing() - start_cycles);
+	// scalar_by_color_call_count++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -441,7 +441,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 #ifdef USE_VECTORIZED_SEARCH
 	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
 #else
-	uint64_t start_cycles = rdtsc_timing();
+	// uint64_t start_cycles = rdtsc_timing();
 	int i;
 
 	uint64_t header_mask = 0;
