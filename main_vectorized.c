@@ -219,6 +219,17 @@ static inline uint64_t rdtsc_timing() {
     return ((uint64_t)hi << 32) | lo;
 }
 
+static inline uint64_t rdtsc_start() {
+    unsigned lo, hi;
+    __asm__ __volatile__("lfence\n\trdtsc" : "=a"(lo), "=d"(hi) :: "memory");
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline uint64_t rdtsc_stop() {
+    unsigned lo, hi;
+    __asm__ __volatile__("rdtscp\n\tlfence" : "=a"(lo), "=d"(hi) :: "rcx","memory");
+    return ((uint64_t)hi << 32) | lo;
+}
+
 void ct_print_timing_stats() {
 	if (vectorized_by_color_call_count > 0) {
 		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average\n", 
@@ -233,7 +244,7 @@ void ct_print_timing_stats() {
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 														  ct_entry_local_copy* result, uint64_t is_secondary,
 														  uint64_t tag, uint64_t color) {
-	// uint64_t start_cycles = rdtsc_timing();
+	uint64_t start_cycles = rdtsc_start();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -257,12 +268,16 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 
 	// Load first 8 bytes of each entry (covers the header fields we need)
 	// _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
-	__m256i headers_vec = _mm256_set_epi64x(
-		*((uint64_t*)&bucket->cells[3]),  // cell[3] header
-		*((uint64_t*)&bucket->cells[2]),  // cell[2] header
-		*((uint64_t*)&bucket->cells[1]),  // cell[1] header
-		*((uint64_t*)&bucket->cells[0])   // cell[0] header
-	);
+	// Load 8B headers from cells 0..3 into one YMM: [cell3,cell2,cell1,cell0]
+	__m128i a0 = _mm_loadl_epi64((__m128i*)&bucket->cells[0]); // 8B
+	__m128i a1 = _mm_loadl_epi64((__m128i*)&bucket->cells[1]); // 8B
+	__m128i lo = _mm_unpacklo_epi64(a0, a1);                   // [cell1,cell0] in 128
+
+	__m128i a2 = _mm_loadl_epi64((__m128i*)&bucket->cells[2]); // 8B
+	__m128i a3 = _mm_loadl_epi64((__m128i*)&bucket->cells[3]); // 8B
+	__m128i hi = _mm_unpacklo_epi64(a2, a3);                   // [cell3,cell2] in 128
+
+	__m256i headers_vec = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
 
 	__m256i mask_vec = _mm256_set1_epi64x((long long)header_mask);
 	__m256i values_vec = _mm256_set1_epi64x((long long)header_values);
@@ -284,8 +299,8 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// vectorized_by_color_total_cycles += (rdtsc_timing() - start_cycles);
-	// vectorized_by_color_call_count++;
+	vectorized_by_color_total_cycles += (rdtsc_stop() - start_cycles);
+	vectorized_by_color_call_count++;
 	
 	return result->last_pos;
 }
@@ -293,7 +308,7 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 														   ct_entry_local_copy* result, uint64_t is_secondary,
 														   uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	// uint64_t start_cycles = rdtsc_timing();
+	uint64_t start_cycles = rdtsc_start();
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -321,12 +336,16 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
 	// Load first 8 bytes of each entry (covers the header fields we need)
     // _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
-    __m256i headers_vec = _mm256_set_epi64x(
-        *((uint64_t*)&bucket->cells[3]),  // cell[3] header
-        *((uint64_t*)&bucket->cells[2]),  // cell[2] header
-        *((uint64_t*)&bucket->cells[1]),  // cell[1] header
-        *((uint64_t*)&bucket->cells[0])   // cell[0] header
-    );
+    // Load 8B headers from cells 0..3 into one YMM: [cell3,cell2,cell1,cell0]
+	__m128i a0 = _mm_loadl_epi64((__m128i*)&bucket->cells[0]); // 8B
+	__m128i a1 = _mm_loadl_epi64((__m128i*)&bucket->cells[1]); // 8B
+	__m128i lo = _mm_unpacklo_epi64(a0, a1);                   // [cell1,cell0] in 128
+
+	__m128i a2 = _mm_loadl_epi64((__m128i*)&bucket->cells[2]); // 8B
+	__m128i a3 = _mm_loadl_epi64((__m128i*)&bucket->cells[3]); // 8B
+	__m128i hi = _mm_unpacklo_epi64(a2, a3);                   // [cell3,cell2] in 128
+
+	__m256i headers_vec = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
 
     // 2) Broadcast mask/value to all 4 lanes.
     __m256i mask_vec   = _mm256_set1_epi64x((long long)header_mask);
@@ -351,8 +370,8 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// vectorized_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
-	// vectorized_by_parent_call_count++;
+	vectorized_by_parent_total_cycles += (rdtsc_stop() - start_cycles);
+	vectorized_by_parent_call_count++;
 	
 	return result->last_pos;
 }
@@ -809,6 +828,18 @@ void extend_jump_node(ct_entry* jump_node, uint64_t symbol) {
 
 	put_bits(jump_node->jump_bits, offset, BITS_PER_SYMBOL, symbol - 1);
 	jump_node->child_color_and_jump_size++;
+}
+
+static inline __m256i load_bucket_headers4(const ct_bucket* b) {
+    __m128i a0 = _mm_loadl_epi64((const __m128i*)&b->cells[0]);
+    __m128i a1 = _mm_loadl_epi64((const __m128i*)&b->cells[1]);
+    __m128i lo = _mm_unpacklo_epi64(a0, a1);  // [c1,c0]
+
+    __m128i a2 = _mm_loadl_epi64((const __m128i*)&b->cells[2]);
+    __m128i a3 = _mm_loadl_epi64((const __m128i*)&b->cells[3]);
+    __m128i hi = _mm_unpacklo_epi64(a2, a3);  // [c3,c2]
+
+    return _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
 }
 
 uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) {

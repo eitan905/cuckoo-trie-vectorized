@@ -22,6 +22,17 @@ static inline uint64_t rdtsc_timing() {
     return ((uint64_t)hi << 32) | lo;
 }
 
+static inline uint64_t rdtsc_start() {
+    unsigned lo, hi;
+    __asm__ __volatile__("lfence\n\trdtsc" : "=a"(lo), "=d"(hi) :: "memory");
+    return ((uint64_t)hi << 32) | lo;
+}
+static inline uint64_t rdtsc_stop() {
+    unsigned lo, hi;
+    __asm__ __volatile__("rdtscp\n\tlfence" : "=a"(lo), "=d"(hi) :: "rcx","memory");
+    return ((uint64_t)hi << 32) | lo;
+}
+
 void ct_print_timing_stats() {
 	if (scalar_by_color_call_count > 0) {
 		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average\n", 
@@ -229,7 +240,7 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
-	// uint64_t start_cycles = rdtsc_timing();
+	uint64_t start_cycles = rdtsc_start();
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -273,8 +284,8 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// scalar_by_color_total_cycles += (rdtsc_timing() - start_cycles);
-	// scalar_by_color_call_count++;
+	scalar_by_color_total_cycles += (rdtsc_stop() - start_cycles);
+	scalar_by_color_call_count++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -284,7 +295,7 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 												 ct_entry_local_copy* result, uint64_t is_secondary,
 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	// uint64_t start_cycles = rdtsc_timing();
+	uint64_t start_cycles = rdtsc_start();
 	int i;
 
 	uint64_t header_mask = 0;
@@ -337,8 +348,8 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// scalar_by_parent_total_cycles += (rdtsc_timing() - start_cycles);
-	// scalar_by_parent_call_count++;
+	scalar_by_parent_total_cycles += (rdtsc_stop() - start_cycles);
+	scalar_by_parent_call_count++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
