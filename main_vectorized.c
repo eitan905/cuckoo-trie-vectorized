@@ -377,16 +377,135 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 }
 
 
+// ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
+// 												ct_entry_local_copy* result, uint64_t is_secondary,
+// 												uint64_t tag, uint64_t color) {
+// 	return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
+// }
+
 ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
-	return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
+	uint64_t start_cycles = rdtsc_start();
+	int i;
+	uint64_t header_mask = 0;
+	uint64_t header_values = 0;
+
+	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+
+	header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
+
+	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+	if (is_secondary)
+		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+
+#ifdef MULTITHREADING
+	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
+	if (start_counter & SEQ_INCREMENT)
+		return NULL;   // Bucket is being written. The retry loop will call us again.
+#else
+	assert(bucket->write_lock_and_seq == 0);
+#endif
+
+	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
+		read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+
+		uint64_t header = *((uint64_t*) (&(result->value)));
+		if ((header & header_mask) == header_values)
+			break;
+	}
+	if (i == CUCKOO_BUCKET_SIZE)
+		return NULL;
+
+#ifdef MULTITHREADING
+	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+		// The bucket changed while we read it. We rely on the retry loop in
+		// find_entry_in_pair_by_color to call us again
+		return NULL;
+	}
+	result->last_seq = start_counter;
+#endif
+
+	result->last_pos = &(bucket->cells[i]);
+	
+	vectorized_by_color_total_cycles += (rdtsc_stop() - start_cycles);
+	vectorized_by_color_call_count++;
+	
+	if (!result->last_pos)
+		__builtin_unreachable();
+	return result->last_pos;
 }
+
+// ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
+// 												 ct_entry_local_copy* result, uint64_t is_secondary,
+// 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+// 	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
+// }
 
 ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 												 ct_entry_local_copy* result, uint64_t is_secondary,
 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
+	uint64_t start_cycles = rdtsc_start();
+	int i;
+
+	uint64_t header_mask = 0;
+	uint64_t header_values = 0;
+
+	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+
+	header_mask |= 0xFFULL << (8*offsetof(ct_entry, last_symbol));
+	header_values |= last_symbol << (8*offsetof(ct_entry, last_symbol));
+
+	const uint64_t parent_color_mask = (0xFFULL << PARENT_COLOR_SHIFT) & 0xFF;
+	header_mask |= parent_color_mask << (8*offsetof(ct_entry, parent_color_and_flags));
+	header_values |= parent_color << (8*offsetof(ct_entry, parent_color_and_flags) + PARENT_COLOR_SHIFT);
+
+	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+	if (is_secondary)
+		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+
+#ifdef MULTITHREADING
+	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
+	if (start_counter & SEQ_INCREMENT)
+		return NULL;   // Bucket is being written. The retry loop will call us again.
+#else
+	assert(bucket->write_lock_and_seq == 0);
+#endif
+
+	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
+		read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+
+		uint64_t header = *((uint64_t*) (&(result->value)));
+		if ((header & header_mask) == header_values) {
+			assert(entry_type(&(result->value)) != TYPE_UNUSED);
+			break;
+		}
+	}
+
+	if (i == CUCKOO_BUCKET_SIZE) {
+		return NULL;
+	}
+
+#ifdef MULTITHREADING
+	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+		// The bucket changed while we read it. We rely on the retry loop in
+		// find_entry_in_pair_by_parent to call us again
+		return NULL;
+	}
+	result->last_seq = start_counter;
+#endif
+
+	result->last_pos = &(bucket->cells[i]);
+	
+	vectorized_by_parent_total_cycles += (rdtsc_stop() - start_cycles);
+	vectorized_by_parent_call_count++;
+	
+	if (!result->last_pos)
+		__builtin_unreachable();
+	return result->last_pos;
 }
 
 // Searches for an entry with color <color> in the specified pair. Copies the entry
@@ -472,6 +591,19 @@ ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket) {
 ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
 	return find_free_cell_in_bucket_vectorized(bucket);
 }
+
+// ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
+// 	int i;
+
+// 	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
+// 		ct_entry_storage* entry = &(bucket->cells[i]);
+// 		if (entry_type((ct_entry*) entry) == TYPE_UNUSED)
+// 			return entry;
+// 	}
+
+// 	return NULL;
+// }
+
 
 ct_entry_storage* find_root(cuckoo_trie* trie, ct_entry_local_copy* result) {
 	uint64_t root_primary_bucket = hash_to_bucket(HASH_START_VALUE);
@@ -883,8 +1015,28 @@ uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) 
 	return __builtin_ctzll(~used_colors);
 }
 
+// uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
+// 	return unused_color_in_pair_vectorized(bucket1, bucket2);
+// }
+
 uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
-	return unused_color_in_pair_vectorized(bucket1, bucket2);
+	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors_will overflow
+	uint64_t used_colors = 0;
+	int i;
+
+	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
+		ct_entry_storage* entry = &(bucket1->cells[i]);
+
+		// Turn on the bit corresponding to the entry's color.
+		used_colors |= 1ULL << entry_color((ct_entry*) entry);
+
+		entry = &(bucket2->cells[i]);
+		used_colors |= 1ULL << entry_color((ct_entry*) entry);
+	}
+
+	const uint64_t all_valid_colors = (1ULL << (MAX_VALID_COLOR + 1)) - 1;
+	assert((used_colors & all_valid_colors) != all_valid_colors);   // There must be a free color
+	return __builtin_ctzll(~used_colors);
 }
 
 typedef struct {
