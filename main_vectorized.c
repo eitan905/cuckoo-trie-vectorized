@@ -208,17 +208,17 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 }
 
 // Global timing variables for vectorized version
-static uint64_t vectorized_by_color_total_cycles = 0;
-static uint64_t vectorized_by_color_call_count = 0;
-static uint64_t vectorized_by_parent_total_cycles = 0;
-static uint64_t vectorized_by_parent_call_count = 0;
+static uint64_t find_by_color_total_cycles = 0;
+static uint64_t find_by_color_call_count = 0;
+static uint64_t find_by_parent_total_cycles = 0;
+static uint64_t find_by_parent_call_count = 0;
 
 // Histogram bins: 50-100, 100-150, ..., 500-550, 550+
 #define HIST_BINS 12
-static uint64_t vectorized_by_color_hist[HIST_BINS] = {0};
-static uint64_t vectorized_by_parent_hist[HIST_BINS] = {0};
-static uint64_t vectorized_by_color_min = UINT64_MAX, vectorized_by_color_max = 0;
-static uint64_t vectorized_by_parent_min = UINT64_MAX, vectorized_by_parent_max = 0;
+static uint64_t find_by_color_hist[HIST_BINS] = {0};
+static uint64_t find_by_parent_hist[HIST_BINS] = {0};
+static uint64_t find_by_color_min = UINT64_MAX, find_by_color_max = 0;
+static uint64_t find_by_parent_min = UINT64_MAX, find_by_parent_max = 0;
 
 static inline uint64_t rdtsc_timing() {
     uint32_t lo, hi;
@@ -296,24 +296,24 @@ static void print_histogram_section(
 }
 
 void ct_print_timing_stats(void) {
-    if (vectorized_by_color_call_count > 0) {
+    if (find_by_color_call_count > 0) {
         print_histogram_section(
             "Vectorized by_color",
-            vectorized_by_color_call_count,
-            vectorized_by_color_total_cycles,
-            vectorized_by_color_min,
-            vectorized_by_color_max,
-            vectorized_by_color_hist
+            find_by_color_call_count,
+            find_by_color_total_cycles,
+            find_by_color_min,
+            find_by_color_max,
+            find_by_color_hist
         );
     }
-    if (vectorized_by_parent_call_count > 0) {
+    if (find_by_parent_call_count > 0) {
         print_histogram_section(
             "Vectorized by_parent",
-            vectorized_by_parent_call_count,
-            vectorized_by_parent_total_cycles,
-            vectorized_by_parent_min,
-            vectorized_by_parent_max,
-            vectorized_by_parent_hist
+            find_by_parent_call_count,
+            find_by_parent_total_cycles,
+            find_by_parent_min,
+            find_by_parent_max,
+            find_by_parent_hist
         );
     }
 }
@@ -364,12 +364,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #endif
             result->last_pos = &(bucket->cells[0]);
             uint64_t cycles = rdtsc_stop() - start_cycles;
-            vectorized_by_parent_total_cycles += cycles;
-            vectorized_by_parent_call_count++;
-            if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
-            if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+            find_by_parent_total_cycles += cycles;
+            find_by_parent_call_count++;
+            if (cycles < find_by_parent_min) find_by_parent_min = cycles;
+            if (cycles > find_by_parent_max) find_by_parent_max = cycles;
             int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
-            vectorized_by_parent_hist[bin]++;
+            find_by_parent_hist[bin]++;
             return result->last_pos;
         }
     }
@@ -382,12 +382,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #endif
             result->last_pos = &(bucket->cells[1]);
             uint64_t cycles = rdtsc_stop() - start_cycles;
-            vectorized_by_parent_total_cycles += cycles;
-            vectorized_by_parent_call_count++;
-            if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
-            if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+            find_by_parent_total_cycles += cycles;
+            find_by_parent_call_count++;
+            if (cycles < find_by_parent_min) find_by_parent_min = cycles;
+            if (cycles > find_by_parent_max) find_by_parent_max = cycles;
             int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
-            vectorized_by_parent_hist[bin]++;
+            find_by_parent_hist[bin]++;
             return result->last_pos;
         }
     }
@@ -405,12 +405,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #endif
             result->last_pos = &(bucket->cells[2]);
             uint64_t cycles = rdtsc_stop() - start_cycles;
-            vectorized_by_parent_total_cycles += cycles;
-            vectorized_by_parent_call_count++;
-            if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
-            if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+            find_by_parent_total_cycles += cycles;
+            find_by_parent_call_count++;
+            if (cycles < find_by_parent_min) find_by_parent_min = cycles;
+            if (cycles > find_by_parent_max) find_by_parent_max = cycles;
             int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
-            vectorized_by_parent_hist[bin]++;
+            find_by_parent_hist[bin]++;
             return result->last_pos;
         }
     }
@@ -423,12 +423,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #endif
             result->last_pos = &(bucket->cells[3]);
             uint64_t cycles = rdtsc_stop() - start_cycles;
-            vectorized_by_parent_total_cycles += cycles;
-            vectorized_by_parent_call_count++;
-            if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
-            if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+            find_by_parent_total_cycles += cycles;
+            find_by_parent_call_count++;
+            if (cycles < find_by_parent_min) find_by_parent_min = cycles;
+            if (cycles > find_by_parent_max) find_by_parent_max = cycles;
             int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
-            vectorized_by_parent_hist[bin]++;
+            find_by_parent_hist[bin]++;
             return result->last_pos;
         }
     }
@@ -501,16 +501,16 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	result->last_pos = &(bucket->cells[i]);
 	
 	uint64_t cycles = rdtsc_stop() - start_cycles;
-	vectorized_by_parent_total_cycles += cycles;
-	vectorized_by_parent_call_count++;
+	find_by_parent_total_cycles += cycles;
+	find_by_parent_call_count++;
 	
 	// Update min/max
-	if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
-	if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+	if (cycles < find_by_parent_min) find_by_parent_min = cycles;
+	if (cycles > find_by_parent_max) find_by_parent_max = cycles;
 	
 	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
 	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	vectorized_by_parent_hist[bin]++;
+	find_by_parent_hist[bin]++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -569,12 +569,12 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
         // ---- your stats (unchanged) ----
         uint64_t cycles = rdtsc_stop() - start_cycles;
-        vectorized_by_color_total_cycles += cycles;
-        vectorized_by_color_call_count++;
-        if (cycles < vectorized_by_color_min) vectorized_by_color_min = cycles;
-        if (cycles > vectorized_by_color_max) vectorized_by_color_max = cycles;
+        find_by_color_total_cycles += cycles;
+        find_by_color_call_count++;
+        if (cycles < find_by_color_min) find_by_color_min = cycles;
+        if (cycles > find_by_color_max) find_by_color_max = cycles;
         int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
-        vectorized_by_color_hist[bin]++;
+        find_by_color_hist[bin]++;
         return result->last_pos;
     }
 
@@ -600,12 +600,12 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
     // ---- your stats (unchanged) ----
     uint64_t cycles = rdtsc_stop() - start_cycles;
-    vectorized_by_color_total_cycles += cycles;
-    vectorized_by_color_call_count++;
-    if (cycles < vectorized_by_color_min) vectorized_by_color_min = cycles;
-    if (cycles > vectorized_by_color_max) vectorized_by_color_max = cycles;
+    find_by_color_total_cycles += cycles;
+    find_by_color_call_count++;
+    if (cycles < find_by_color_min) find_by_color_min = cycles;
+    if (cycles > find_by_color_max) find_by_color_max = cycles;
     int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
-    vectorized_by_color_hist[bin]++;
+    find_by_color_hist[bin]++;
     return result->last_pos;
 }
 
@@ -658,16 +658,16 @@ ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
 	result->last_pos = &(bucket->cells[i]);
 	
 	uint64_t cycles = rdtsc_stop() - start_cycles;
-	vectorized_by_color_total_cycles += cycles;
-	vectorized_by_color_call_count++;
+	find_by_color_total_cycles += cycles;
+	find_by_color_call_count++;
 	
 	// Update min/max
-	if (cycles < vectorized_by_color_min) vectorized_by_color_min = cycles;
-	if (cycles > vectorized_by_color_max) vectorized_by_color_max = cycles;
+	if (cycles < find_by_color_min) find_by_color_min = cycles;
+	if (cycles > find_by_color_max) find_by_color_max = cycles;
 	
 	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
 	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	vectorized_by_color_hist[bin]++;
+	find_by_color_hist[bin]++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();

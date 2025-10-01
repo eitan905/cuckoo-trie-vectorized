@@ -11,17 +11,17 @@
 #include "util.h"
 
 // Global timing variables for scalar version
-static uint64_t scalar_by_color_total_cycles = 0;
-static uint64_t scalar_by_color_call_count = 0;
-static uint64_t scalar_by_parent_total_cycles = 0;
-static uint64_t scalar_by_parent_call_count = 0;
+static uint64_t find_by_color_total_cycles = 0;
+static uint64_t find_by_color_call_count = 0;
+static uint64_t find_by_parent_total_cycles = 0;
+static uint64_t find_by_parent_call_count = 0;
 
 // Histogram bins: 50-100, 100-150, ..., 500-550, 550+
 #define HIST_BINS 12
-static uint64_t scalar_by_color_hist[HIST_BINS] = {0};
-static uint64_t scalar_by_parent_hist[HIST_BINS] = {0};
-static uint64_t scalar_by_color_min = UINT64_MAX, scalar_by_color_max = 0;
-static uint64_t scalar_by_parent_min = UINT64_MAX, scalar_by_parent_max = 0;
+static uint64_t find_by_color_hist[HIST_BINS] = {0};
+static uint64_t find_by_parent_hist[HIST_BINS] = {0};
+static uint64_t find_by_color_min = UINT64_MAX, find_by_color_max = 0;
+static uint64_t find_by_parent_min = UINT64_MAX, find_by_parent_max = 0;
 
 static inline uint64_t rdtsc_timing() {
     uint32_t lo, hi;
@@ -40,26 +40,6 @@ static inline uint64_t rdtsc_stop() {
     return ((uint64_t)hi << 32) | lo;
 }
 
-void ct_print_timing_stats() {
-	if (scalar_by_color_call_count > 0) {
-		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
-		       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count,
-		       scalar_by_color_min, scalar_by_color_max);
-		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
-		       scalar_by_color_hist[0], scalar_by_color_hist[1], scalar_by_color_hist[2], scalar_by_color_hist[3],
-		       scalar_by_color_hist[4], scalar_by_color_hist[5], scalar_by_color_hist[6], scalar_by_color_hist[7],
-		       scalar_by_color_hist[8], scalar_by_color_hist[9], scalar_by_color_hist[10], scalar_by_color_hist[11]);
-	}
-	if (scalar_by_parent_call_count > 0) {
-		printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
-		       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count,
-		       scalar_by_parent_min, scalar_by_parent_max);
-		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
-		       scalar_by_parent_hist[0], scalar_by_parent_hist[1], scalar_by_parent_hist[2], scalar_by_parent_hist[3],
-		       scalar_by_parent_hist[4], scalar_by_parent_hist[5], scalar_by_parent_hist[6], scalar_by_parent_hist[7],
-		       scalar_by_parent_hist[8], scalar_by_parent_hist[9], scalar_by_parent_hist[10], scalar_by_parent_hist[11]);
-	}
-}
 
 // The root has to have a last symbol in order to have an alternate bucket.
 // The following value was arbitrarily chosen.
@@ -302,16 +282,16 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 	result->last_pos = &(bucket->cells[i]);
 	
 	uint64_t cycles = rdtsc_stop() - start_cycles;
-	scalar_by_color_total_cycles += cycles;
-	scalar_by_color_call_count++;
+	find_by_color_total_cycles += cycles;
+	find_by_color_call_count++;
 	
 	// Update min/max
-	if (cycles < scalar_by_color_min) scalar_by_color_min = cycles;
-	if (cycles > scalar_by_color_max) scalar_by_color_max = cycles;
+	if (cycles < find_by_color_min) find_by_color_min = cycles;
+	if (cycles > find_by_color_max) find_by_color_max = cycles;
 	
 	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
 	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	scalar_by_color_hist[bin]++;
+	find_by_color_hist[bin]++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -375,16 +355,16 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	result->last_pos = &(bucket->cells[i]);
 	
 	uint64_t cycles = rdtsc_stop() - start_cycles;
-	scalar_by_parent_total_cycles += cycles;
-	scalar_by_parent_call_count++;
+	find_by_parent_total_cycles += cycles;
+	find_by_parent_call_count++;
 	
 	// Update min/max
-	if (cycles < scalar_by_parent_min) scalar_by_parent_min = cycles;
-	if (cycles > scalar_by_parent_max) scalar_by_parent_max = cycles;
+	if (cycles < find_by_parent_min) find_by_parent_min = cycles;
+	if (cycles > find_by_parent_max) find_by_parent_max = cycles;
 	
 	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
 	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	scalar_by_parent_hist[bin]++;
+	find_by_parent_hist[bin]++;
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -2350,25 +2330,90 @@ cuckoo_trie* ct_alloc(uint64_t num_cells) {
 	return result;
 }
 
+
+static void print_histogram_section(
+    const char *title,
+    unsigned long calls,
+    uint64_t total_cycles,
+    unsigned long min_cycles,
+    unsigned long max_cycles,
+    const unsigned long hist[12]
+) {
+    if (calls == 0) return;
+
+    // Compute stats
+    double avg = (double)total_cycles / (double)calls;
+
+    // Sum and find the largest bin for scaling the bar chart
+    unsigned long max_bin = 0, sum = 0;
+    for (int i = 0; i < 12; ++i) {
+        sum += hist[i];
+        if (hist[i] > max_bin) max_bin = hist[i];
+    }
+    if (max_bin == 0) max_bin = 1; // avoid div-by-zero
+
+    // Header
+    printf("\n===== %s =====\n", title);
+    printf("Calls: %lu | Avg: %.2f cycles/call | Min: %lu | Max: %lu\n",
+           calls, avg, min_cycles, max_cycles);
+    printf("Histogram (bin size = 50 cycles)\n");
+    printf("%-10s %12s %10s  %s\n", "Range", "Count", "Percent", "Bar");
+    printf("---------------------------------------------------------------\n");
+
+    // Helper to print range label
+    for (int i = 0; i < 12; ++i) {
+        char label[16];
+        if (i == 0) {
+            snprintf(label, sizeof(label), "<50");
+        } else if (i == 11) {
+            snprintf(label, sizeof(label), "550+");
+        } else {
+            int low  = 50 * i;
+            int high = 50 * (i + 1);
+            snprintf(label, sizeof(label), "%d-%d", low, high);
+        }
+
+        // Bar scaled to 50 chars
+        int bar_len = (int)((hist[i] * 50UL + max_bin / 2) / max_bin);
+        if (bar_len < 0) bar_len = 0;
+        if (bar_len > 50) bar_len = 50;
+
+        char bar[52];
+        int j = 0;
+        for (; j < bar_len; ++j) bar[j] = '#';
+        for (; j < 50;     ++j) bar[j] = ' ';
+        bar[50] = '\0';
+
+        double pct = (calls > 0) ? (100.0 * (double)hist[i] / (double)calls) : 0.0;
+        printf("%-10s %12lu %9.2f%%  |%s|\n", label, hist[i], pct, bar);
+    }
+}
+
+void ct_print_timing_stats(void) {
+    if (find_by_color_call_count > 0) {
+        print_histogram_section(
+            "Scalar by_color",
+            find_by_color_call_count,
+            find_by_color_total_cycles,
+            find_by_color_min,
+            find_by_color_max,
+            find_by_color_hist
+        );
+    }
+    if (find_by_parent_call_count > 0) {
+        print_histogram_section(
+            "Scalar by_parent",
+            find_by_parent_call_count,
+            find_by_parent_total_cycles,
+            find_by_parent_min,
+            find_by_parent_max,
+            find_by_parent_hist
+        );
+    }
+}
+
 void ct_free(cuckoo_trie* trie) {
-	if (scalar_by_color_call_count > 0) {
-		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
-		       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count,
-		       scalar_by_color_min, scalar_by_color_max);
-		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
-		       scalar_by_color_hist[0], scalar_by_color_hist[1], scalar_by_color_hist[2], scalar_by_color_hist[3],
-		       scalar_by_color_hist[4], scalar_by_color_hist[5], scalar_by_color_hist[6], scalar_by_color_hist[7],
-		       scalar_by_color_hist[8], scalar_by_color_hist[9], scalar_by_color_hist[10], scalar_by_color_hist[11]);
-	}
-	if (scalar_by_parent_call_count > 0) {
-		printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
-		       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count,
-		       scalar_by_parent_min, scalar_by_parent_max);
-		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
-		       scalar_by_parent_hist[0], scalar_by_parent_hist[1], scalar_by_parent_hist[2], scalar_by_parent_hist[3],
-		       scalar_by_parent_hist[4], scalar_by_parent_hist[5], scalar_by_parent_hist[6], scalar_by_parent_hist[7],
-		       scalar_by_parent_hist[8], scalar_by_parent_hist[9], scalar_by_parent_hist[10], scalar_by_parent_hist[11]);
-	}
+	ct_print_timing_stats();
 	uint64_t buckets_pages = (trie->num_buckets * sizeof(ct_bucket)) / HUGEPAGE_SIZE + 1;
 	munmap(trie->buckets, buckets_pages * HUGEPAGE_SIZE);
 	free(trie);
