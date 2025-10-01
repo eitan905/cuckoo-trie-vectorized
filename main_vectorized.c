@@ -237,250 +237,206 @@ static inline uint64_t rdtsc_stop() {
     return ((uint64_t)hi << 32) | lo;
 }
 
-void ct_print_timing_stats() {
-	if (vectorized_by_color_call_count > 0) {
-		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
-		       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count,
-		       vectorized_by_color_min, vectorized_by_color_max);
-		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
-		       vectorized_by_color_hist[0], vectorized_by_color_hist[1], vectorized_by_color_hist[2], vectorized_by_color_hist[3],
-		       vectorized_by_color_hist[4], vectorized_by_color_hist[5], vectorized_by_color_hist[6], vectorized_by_color_hist[7],
-		       vectorized_by_color_hist[8], vectorized_by_color_hist[9], vectorized_by_color_hist[10], vectorized_by_color_hist[11]);
-	}
-	if (vectorized_by_parent_call_count > 0) {
-		printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
-		       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count,
-		       vectorized_by_parent_min, vectorized_by_parent_max);
-		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
-		       vectorized_by_parent_hist[0], vectorized_by_parent_hist[1], vectorized_by_parent_hist[2], vectorized_by_parent_hist[3],
-		       vectorized_by_parent_hist[4], vectorized_by_parent_hist[5], vectorized_by_parent_hist[6], vectorized_by_parent_hist[7],
-		       vectorized_by_parent_hist[8], vectorized_by_parent_hist[9], vectorized_by_parent_hist[10], vectorized_by_parent_hist[11]);
-	}
+static void print_histogram_section(
+    const char *title,
+    unsigned long calls,
+    uint64_t total_cycles,
+    unsigned long min_cycles,
+    unsigned long max_cycles,
+    const unsigned long hist[12]
+) {
+    if (calls == 0) return;
+
+    // Compute stats
+    double avg = (double)total_cycles / (double)calls;
+
+    // Sum and find the largest bin for scaling the bar chart
+    unsigned long max_bin = 0, sum = 0;
+    for (int i = 0; i < 12; ++i) {
+        sum += hist[i];
+        if (hist[i] > max_bin) max_bin = hist[i];
+    }
+    if (max_bin == 0) max_bin = 1; // avoid div-by-zero
+
+    // Header
+    printf("\n===== %s =====\n", title);
+    printf("Calls: %lu | Avg: %.2f cycles/call | Min: %lu | Max: %lu\n",
+           calls, avg, min_cycles, max_cycles);
+    printf("Histogram (bin size = 50 cycles)\n");
+    printf("%-10s %12s %10s  %s\n", "Range", "Count", "Percent", "Bar");
+    printf("---------------------------------------------------------------\n");
+
+    // Helper to print range label
+    for (int i = 0; i < 12; ++i) {
+        char label[16];
+        if (i == 0) {
+            snprintf(label, sizeof(label), "<50");
+        } else if (i == 11) {
+            snprintf(label, sizeof(label), "550+");
+        } else {
+            int low  = 50 * i;
+            int high = 50 * (i + 1);
+            snprintf(label, sizeof(label), "%d-%d", low, high);
+        }
+
+        // Bar scaled to 50 chars
+        int bar_len = (int)((hist[i] * 50UL + max_bin / 2) / max_bin);
+        if (bar_len < 0) bar_len = 0;
+        if (bar_len > 50) bar_len = 50;
+
+        char bar[52];
+        int j = 0;
+        for (; j < bar_len; ++j) bar[j] = '#';
+        for (; j < 50;     ++j) bar[j] = ' ';
+        bar[50] = '\0';
+
+        double pct = (calls > 0) ? (100.0 * (double)hist[i] / (double)calls) : 0.0;
+        printf("%-10s %12lu %9.2f%%  |%s|\n", label, hist[i], pct, bar);
+    }
 }
 
-ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
-														  ct_entry_local_copy* result, uint64_t is_secondary,
-														  uint64_t tag, uint64_t color) {
-	uint64_t start_cycles = rdtsc_start();
-	uint64_t header_mask = 0;
-	uint64_t header_values = 0;
-
-	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
-
-	header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
-
-	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-	if (is_secondary)
-		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-
-#ifdef MULTITHREADING
-	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
-	if (start_counter & SEQ_INCREMENT)
-		return NULL;
-#else
-	assert(bucket->write_lock_and_seq == 0);
-#endif
-
-	// Load first 8 bytes of each entry (covers the header fields we need)
-	// _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
-	// Load 8B headers from cells 0..3 into one YMM: [cell3,cell2,cell1,cell0]
-	__m128i a0 = _mm_loadl_epi64((__m128i*)&bucket->cells[0]); // 8B
-	__m128i a1 = _mm_loadl_epi64((__m128i*)&bucket->cells[1]); // 8B
-	__m128i lo = _mm_unpacklo_epi64(a0, a1);                   // [cell1,cell0] in 128
-
-	__m128i a2 = _mm_loadl_epi64((__m128i*)&bucket->cells[2]); // 8B
-	__m128i a3 = _mm_loadl_epi64((__m128i*)&bucket->cells[3]); // 8B
-	__m128i hi = _mm_unpacklo_epi64(a2, a3);                   // [cell3,cell2] in 128
-
-	__m256i headers_vec = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
-
-	__m256i mask_vec = _mm256_set1_epi64x((long long)header_mask);
-	__m256i values_vec = _mm256_set1_epi64x((long long)header_values);
-	__m256i masked = _mm256_and_si256(headers_vec, mask_vec);
-	__m256i cmp = _mm256_cmpeq_epi64(masked, values_vec);
-	int mask = _mm256_movemask_epi8(cmp);
-	
-	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
-	if (i == CUCKOO_BUCKET_SIZE)
-		return NULL;
-
-	read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
-
-#ifdef MULTITHREADING
-	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-		return NULL;
-	result->last_seq = start_counter;
-#endif
-
-	result->last_pos = &(bucket->cells[i]);
-	
-	uint64_t cycles = rdtsc_stop() - start_cycles;
-	vectorized_by_color_total_cycles += cycles;
-	vectorized_by_color_call_count++;
-	
-	// Update min/max
-	if (cycles < vectorized_by_color_min) vectorized_by_color_min = cycles;
-	if (cycles > vectorized_by_color_max) vectorized_by_color_max = cycles;
-	
-	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
-	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	vectorized_by_color_hist[bin]++;
-	
-	return result->last_pos;
+void ct_print_timing_stats(void) {
+    if (vectorized_by_color_call_count > 0) {
+        print_histogram_section(
+            "Vectorized by_color",
+            vectorized_by_color_call_count,
+            vectorized_by_color_total_cycles,
+            vectorized_by_color_min,
+            vectorized_by_color_max,
+            vectorized_by_color_hist
+        );
+    }
+    if (vectorized_by_parent_call_count > 0) {
+        print_histogram_section(
+            "Vectorized by_parent",
+            vectorized_by_parent_call_count,
+            vectorized_by_parent_total_cycles,
+            vectorized_by_parent_min,
+            vectorized_by_parent_max,
+            vectorized_by_parent_hist
+        );
+    }
 }
+
 
 ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
-														   ct_entry_local_copy* result, uint64_t is_secondary,
-														   uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	uint64_t start_cycles = rdtsc_start();
-	uint64_t header_mask = 0;
-	uint64_t header_values = 0;
+                                                           ct_entry_local_copy* result, uint64_t is_secondary,
+                                                           uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+    uint64_t start_cycles = rdtsc_start();
 
-	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+    // --- your original mask/value build (unchanged) ---
+    uint64_t header_mask = 0, header_values = 0;
+    header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+    header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+    header_mask |= 0xFFULL << (8*offsetof(ct_entry, last_symbol));
+    header_values |= last_symbol << (8*offsetof(ct_entry, last_symbol));
+    const uint64_t parent_color_mask = (0xFFULL << PARENT_COLOR_SHIFT) & 0xFF;
+    header_mask |= parent_color_mask << (8*offsetof(ct_entry, parent_color_and_flags));
+    header_values |= parent_color << (8*offsetof(ct_entry, parent_color_and_flags) + PARENT_COLOR_SHIFT);
+    header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+    if (is_secondary)
+        header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
 
-	header_mask |= 0xFFULL << (8*offsetof(ct_entry, last_symbol));
-	header_values |= last_symbol << (8*offsetof(ct_entry, last_symbol));
-
-	const uint64_t parent_color_mask = (0xFFULL << PARENT_COLOR_SHIFT) & 0xFF;
-	header_mask |= parent_color_mask << (8*offsetof(ct_entry, parent_color_and_flags));
-	header_values |= parent_color << (8*offsetof(ct_entry, parent_color_and_flags) + PARENT_COLOR_SHIFT);
-
-	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-	if (is_secondary)
-		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+    // --- cheap tag-only prefilter (one byte) ---
+    const size_t OFF_CAT = offsetof(ct_entry, color_and_tag);
+    const uint64_t tag_low_mask = ((1ULL << TAG_BITS) - 1);
+    const uint64_t tag_mask64   = tag_low_mask << (8 * OFF_CAT);
+    const uint64_t tag_value64  = (tag & tag_low_mask) << (8 * OFF_CAT);
 
 #ifdef MULTITHREADING
-	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
-	if (start_counter & SEQ_INCREMENT)
-		return NULL;
+    uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
+    if (start_counter & SEQ_INCREMENT) return NULL;
 #else
-	assert(bucket->write_lock_and_seq == 0);
+    assert(bucket->write_lock_and_seq == 0);
 #endif
 
-	// Load first 8 bytes of each entry (covers the header fields we need)
-    // _mm256_set_epi64x order is [lane3, lane2, lane1, lane0]
-    // Load 8B headers from cells 0..3 into one YMM: [cell3,cell2,cell1,cell0]
-	__m128i a0 = _mm_loadl_epi64((__m128i*)&bucket->cells[0]); // 8B
-	__m128i a1 = _mm_loadl_epi64((__m128i*)&bucket->cells[1]); // 8B
-	__m128i lo = _mm_unpacklo_epi64(a0, a1);                   // [cell1,cell0] in 128
+    // ---- pair [0,1] ----
+    uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
+    uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
 
-	__m128i a2 = _mm_loadl_epi64((__m128i*)&bucket->cells[2]); // 8B
-	__m128i a3 = _mm_loadl_epi64((__m128i*)&bucket->cells[3]); // 8B
-	__m128i hi = _mm_unpacklo_epi64(a2, a3);                   // [cell3,cell2] in 128
-
-	__m256i headers_vec = _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
-
-    // 2) Broadcast mask/value to all 4 lanes.
-    __m256i mask_vec   = _mm256_set1_epi64x((long long)header_mask);
-    __m256i values_vec = _mm256_set1_epi64x((long long)header_values);
-
-    // 3) (header & mask) == value, per lane, then compress result to a byte mask.
-    __m256i masked = _mm256_and_si256(headers_vec, mask_vec);
-    __m256i cmp    = _mm256_cmpeq_epi64(masked, values_vec);
-    int     mask   = _mm256_movemask_epi8(cmp);
-	
-	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
-	if (i == CUCKOO_BUCKET_SIZE)
-		return NULL;
-
-	read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
-
+    // skip empty quickly (TYPE_UNUSED == 0; TYPE_MASK selects type in byte 0)
+    if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
+        if ((h0 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
 #ifdef MULTITHREADING
-	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-		return NULL;
-	result->last_seq = start_counter;
+            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+            result->last_seq = start_counter;
 #endif
+            result->last_pos = &(bucket->cells[0]);
+            uint64_t cycles = rdtsc_stop() - start_cycles;
+            vectorized_by_parent_total_cycles += cycles;
+            vectorized_by_parent_call_count++;
+            if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
+            if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+            int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
+            vectorized_by_parent_hist[bin]++;
+            return result->last_pos;
+        }
+    }
+    if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
+        if ((h1 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
+#ifdef MULTITHREADING
+            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+            result->last_seq = start_counter;
+#endif
+            result->last_pos = &(bucket->cells[1]);
+            uint64_t cycles = rdtsc_stop() - start_cycles;
+            vectorized_by_parent_total_cycles += cycles;
+            vectorized_by_parent_call_count++;
+            if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
+            if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+            int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
+            vectorized_by_parent_hist[bin]++;
+            return result->last_pos;
+        }
+    }
 
-	result->last_pos = &(bucket->cells[i]);
-	
-	uint64_t cycles = rdtsc_stop() - start_cycles;
-	vectorized_by_parent_total_cycles += cycles;
-	vectorized_by_parent_call_count++;
-	
-	// Update min/max
-	if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
-	if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
-	
-	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
-	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	vectorized_by_parent_hist[bin]++;
-	
-	return result->last_pos;
+    // ---- pair [2,3] ----
+    uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
+    uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
+
+    if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) {
+        if ((h2 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
+#ifdef MULTITHREADING
+            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+            result->last_seq = start_counter;
+#endif
+            result->last_pos = &(bucket->cells[2]);
+            uint64_t cycles = rdtsc_stop() - start_cycles;
+            vectorized_by_parent_total_cycles += cycles;
+            vectorized_by_parent_call_count++;
+            if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
+            if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+            int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
+            vectorized_by_parent_hist[bin]++;
+            return result->last_pos;
+        }
+    }
+    if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) {
+        if ((h3 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
+#ifdef MULTITHREADING
+            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+            result->last_seq = start_counter;
+#endif
+            result->last_pos = &(bucket->cells[3]);
+            uint64_t cycles = rdtsc_stop() - start_cycles;
+            vectorized_by_parent_total_cycles += cycles;
+            vectorized_by_parent_call_count++;
+            if (cycles < vectorized_by_parent_min) vectorized_by_parent_min = cycles;
+            if (cycles > vectorized_by_parent_max) vectorized_by_parent_max = cycles;
+            int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
+            vectorized_by_parent_hist[bin]++;
+            return result->last_pos;
+        }
+    }
+
+    return NULL;
 }
 
 
-// ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
-// 												ct_entry_local_copy* result, uint64_t is_secondary,
-// 												uint64_t tag, uint64_t color) {
-// 	return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
-// }
-
-ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
-												ct_entry_local_copy* result, uint64_t is_secondary,
-												uint64_t tag, uint64_t color) {
-	uint64_t start_cycles = rdtsc_start();
-	int i;
-	uint64_t header_mask = 0;
-	uint64_t header_values = 0;
-
-	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
-
-	header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
-
-	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-	if (is_secondary)
-		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-
-#ifdef MULTITHREADING
-	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
-	if (start_counter & SEQ_INCREMENT)
-		return NULL;   // Bucket is being written. The retry loop will call us again.
-#else
-	assert(bucket->write_lock_and_seq == 0);
-#endif
-
-	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-		read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
-
-		uint64_t header = *((uint64_t*) (&(result->value)));
-		if ((header & header_mask) == header_values)
-			break;
-	}
-	if (i == CUCKOO_BUCKET_SIZE)
-		return NULL;
-
-#ifdef MULTITHREADING
-	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
-		// The bucket changed while we read it. We rely on the retry loop in
-		// find_entry_in_pair_by_color to call us again
-		return NULL;
-	}
-	result->last_seq = start_counter;
-#endif
-
-	result->last_pos = &(bucket->cells[i]);
-	
-	uint64_t cycles = rdtsc_stop() - start_cycles;
-	vectorized_by_color_total_cycles += cycles;
-	vectorized_by_color_call_count++;
-	
-	// Update min/max
-	if (cycles < vectorized_by_color_min) vectorized_by_color_min = cycles;
-	if (cycles > vectorized_by_color_max) vectorized_by_color_max = cycles;
-	
-	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
-	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	vectorized_by_color_hist[bin]++;
-	
-	if (!result->last_pos)
-		__builtin_unreachable();
-	return result->last_pos;
-}
 
 // ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 // 												 ct_entry_local_copy* result, uint64_t is_secondary,
@@ -561,10 +517,171 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	return result->last_pos;
 }
 
+
+ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
+                                                          ct_entry_local_copy* result, uint64_t is_secondary,
+                                                          uint64_t tag, uint64_t color) {
+    uint64_t start_cycles = rdtsc_start();
+
+    // ---- keep your original mask/value construction EXACTLY as-is ----
+    uint64_t header_mask = 0;
+    uint64_t header_values = 0;
+
+    header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+    header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+
+    header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
+    header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
+
+    header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+    if (is_secondary)
+        header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+
+#ifdef MULTITHREADING
+    uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
+    if (start_counter & SEQ_INCREMENT)
+        return NULL;
+#else
+    assert(bucket->write_lock_and_seq == 0);
+#endif
+
+    // ---- pairwise check: [0,1] first, then [2,3] if needed ----
+    __m128i mask128 = _mm_set1_epi64x((long long)header_mask);
+    __m128i vals128 = _mm_set1_epi64x((long long)header_values);
+
+    // Load headers 0,1
+    uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
+    uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
+
+    __m128i headers01 = _mm_set_epi64x((long long)h1, (long long)h0);
+    __m128i cmp01     = _mm_cmpeq_epi64(_mm_and_si128(headers01, mask128), vals128);
+    unsigned m01      = (unsigned)_mm_movemask_epi8(cmp01);
+
+    if (__builtin_expect(m01 != 0u, 1)) {
+        int i = (int)(__builtin_ctz(m01) >> 3);   // 0 or 1
+        read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+#ifdef MULTITHREADING
+        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
+            return NULL;
+        result->last_seq = start_counter;
+#endif
+        result->last_pos = &(bucket->cells[i]);
+
+        // ---- your stats (unchanged) ----
+        uint64_t cycles = rdtsc_stop() - start_cycles;
+        vectorized_by_color_total_cycles += cycles;
+        vectorized_by_color_call_count++;
+        if (cycles < vectorized_by_color_min) vectorized_by_color_min = cycles;
+        if (cycles > vectorized_by_color_max) vectorized_by_color_max = cycles;
+        int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
+        vectorized_by_color_hist[bin]++;
+        return result->last_pos;
+    }
+
+    // Not found in [0,1] → check [2,3]
+    uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
+    uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
+
+    __m128i headers23 = _mm_set_epi64x((long long)h3, (long long)h2);
+    __m128i cmp23     = _mm_cmpeq_epi64(_mm_and_si128(headers23, mask128), vals128);
+    unsigned m23      = (unsigned)_mm_movemask_epi8(cmp23);
+
+    if (__builtin_expect(m23 == 0u, 1))
+        return NULL;
+
+    int i = 2 + (int)(__builtin_ctz(m23) >> 3);   // 2 or 3
+    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+#ifdef MULTITHREADING
+    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
+        return NULL;
+    result->last_seq = start_counter;
+#endif
+    result->last_pos = &(bucket->cells[i]);
+
+    // ---- your stats (unchanged) ----
+    uint64_t cycles = rdtsc_stop() - start_cycles;
+    vectorized_by_color_total_cycles += cycles;
+    vectorized_by_color_call_count++;
+    if (cycles < vectorized_by_color_min) vectorized_by_color_min = cycles;
+    if (cycles > vectorized_by_color_max) vectorized_by_color_max = cycles;
+    int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (int)((cycles - 50) / 50));
+    vectorized_by_color_hist[bin]++;
+    return result->last_pos;
+}
+
+
+ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
+												ct_entry_local_copy* result, uint64_t is_secondary,
+												uint64_t tag, uint64_t color) {
+	uint64_t start_cycles = rdtsc_start();
+	int i;
+	uint64_t header_mask = 0;
+	uint64_t header_values = 0;
+
+	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+
+	header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
+
+	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+	if (is_secondary)
+		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+
+#ifdef MULTITHREADING
+	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
+	if (start_counter & SEQ_INCREMENT)
+		return NULL;   // Bucket is being written. The retry loop will call us again.
+#else
+	assert(bucket->write_lock_and_seq == 0);
+#endif
+
+	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
+		read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+
+		uint64_t header = *((uint64_t*) (&(result->value)));
+		if ((header & header_mask) == header_values)
+			break;
+	}
+	if (i == CUCKOO_BUCKET_SIZE)
+		return NULL;
+
+#ifdef MULTITHREADING
+	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+		// The bucket changed while we read it. We rely on the retry loop in
+		// find_entry_in_pair_by_color to call us again
+		return NULL;
+	}
+	result->last_seq = start_counter;
+#endif
+
+	result->last_pos = &(bucket->cells[i]);
+	
+	uint64_t cycles = rdtsc_stop() - start_cycles;
+	vectorized_by_color_total_cycles += cycles;
+	vectorized_by_color_call_count++;
+	
+	// Update min/max
+	if (cycles < vectorized_by_color_min) vectorized_by_color_min = cycles;
+	if (cycles > vectorized_by_color_max) vectorized_by_color_max = cycles;
+	
+	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
+	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
+	vectorized_by_color_hist[bin]++;
+	
+	if (!result->last_pos)
+		__builtin_unreachable();
+	return result->last_pos;
+}
+
+
+
 // Searches for an entry with color <color> in the specified pair. Copies the entry
 // found to <result> and also returns its address. Assumes the entry is in the pair.
 // Note: When multithreading, the returned address is meaningless, as the entry might
 //       have been moved since it was read. Use only the value written into <result>
+
+
 ct_entry_storage* find_entry_in_pair_by_color(cuckoo_trie* trie, ct_entry_local_copy* result,
 											  uint64_t primary_bucket, uint64_t tag,
 											  uint8_t color) {
@@ -621,41 +738,52 @@ ct_entry_storage* find_entry_in_pair_by_parent(cuckoo_trie* trie, ct_entry_local
 }
 
 ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket) {
-	// Load first 8 bytes of each entry (covers type field)
-	__m256i headers_vec = _mm256_set_epi64x(
-		*((uint64_t*)&bucket->cells[3]),
-		*((uint64_t*)&bucket->cells[2]),
-		*((uint64_t*)&bucket->cells[1]),
-		*((uint64_t*)&bucket->cells[0])
-	);
+    // Compare TYPE bits of two headers at a time: [0,1] → early return; else [2,3].
+    __m128i type_mask128 = _mm_set1_epi64x((long long)TYPE_MASK);
+    __m128i unused128    = _mm_set1_epi64x((long long)TYPE_UNUSED);
 
-	// Create mask for TYPE_UNUSED using TYPE_MASK
-	__m256i type_mask = _mm256_set1_epi64x(TYPE_MASK);
-	__m256i unused_val = _mm256_set1_epi64x(TYPE_UNUSED);
-	
-	__m256i masked = _mm256_and_si256(headers_vec, type_mask);
-	__m256i cmp = _mm256_cmpeq_epi64(masked, unused_val);
-	int mask = _mm256_movemask_epi8(cmp);
-	
-	int i = mask ? (__builtin_ctz(mask) >> 3) : CUCKOO_BUCKET_SIZE;
-	return (i == CUCKOO_BUCKET_SIZE) ? NULL : &(bucket->cells[i]);
+    // --- pair [0,1] ---
+    uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
+    uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
+
+    __m128i headers01 = _mm_set_epi64x((long long)h1, (long long)h0);
+    __m128i cmp01     = _mm_cmpeq_epi64(_mm_and_si128(headers01, type_mask128), unused128);
+    unsigned m01      = (unsigned)_mm_movemask_epi8(cmp01);
+    if (__builtin_expect(m01 != 0u, 1)) {
+        int idx = (int)(__builtin_ctz(m01) >> 3);   // 0 or 1
+        return &bucket->cells[idx];
+    }
+
+    // --- pair [2,3] ---
+    uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
+    uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
+
+    __m128i headers23 = _mm_set_epi64x((long long)h3, (long long)h2);
+    __m128i cmp23     = _mm_cmpeq_epi64(_mm_and_si128(headers23, type_mask128), unused128);
+    unsigned m23      = (unsigned)_mm_movemask_epi8(cmp23);
+    if (__builtin_expect(m23 == 0u, 1))
+        return NULL;
+
+    int idx = 2 + (int)(__builtin_ctz(m23) >> 3);   // 2 or 3
+    return &bucket->cells[idx];
 }
+
 
 ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
 	return find_free_cell_in_bucket_vectorized(bucket);
 }
 
-// ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
-// 	int i;
+ct_entry_storage* find_free_cell_in_buckett(ct_bucket* bucket) {
+	int i;
 
-// 	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-// 		ct_entry_storage* entry = &(bucket->cells[i]);
-// 		if (entry_type((ct_entry*) entry) == TYPE_UNUSED)
-// 			return entry;
-// 	}
+	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
+		ct_entry_storage* entry = &(bucket->cells[i]);
+		if (entry_type((ct_entry*) entry) == TYPE_UNUSED)
+			return entry;
+	}
 
-// 	return NULL;
-// }
+	return NULL;
+}
 
 
 ct_entry_storage* find_root(cuckoo_trie* trie, ct_entry_local_copy* result) {
@@ -2608,24 +2736,7 @@ cuckoo_trie* ct_alloc(uint64_t num_cells) {
 }
 
 void ct_free(cuckoo_trie* trie) {
-	if (vectorized_by_color_call_count > 0) {
-		printf("Vectorized by_color timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
-		       vectorized_by_color_call_count, (double)vectorized_by_color_total_cycles / vectorized_by_color_call_count,
-		       vectorized_by_color_min, vectorized_by_color_max);
-		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
-		       vectorized_by_color_hist[0], vectorized_by_color_hist[1], vectorized_by_color_hist[2], vectorized_by_color_hist[3],
-		       vectorized_by_color_hist[4], vectorized_by_color_hist[5], vectorized_by_color_hist[6], vectorized_by_color_hist[7],
-		       vectorized_by_color_hist[8], vectorized_by_color_hist[9], vectorized_by_color_hist[10], vectorized_by_color_hist[11]);
-	}
-	if (vectorized_by_parent_call_count > 0) {
-		printf("Vectorized by_parent timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
-		       vectorized_by_parent_call_count, (double)vectorized_by_parent_total_cycles / vectorized_by_parent_call_count,
-		       vectorized_by_parent_min, vectorized_by_parent_max);
-		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
-		       vectorized_by_parent_hist[0], vectorized_by_parent_hist[1], vectorized_by_parent_hist[2], vectorized_by_parent_hist[3],
-		       vectorized_by_parent_hist[4], vectorized_by_parent_hist[5], vectorized_by_parent_hist[6], vectorized_by_parent_hist[7],
-		       vectorized_by_parent_hist[8], vectorized_by_parent_hist[9], vectorized_by_parent_hist[10], vectorized_by_parent_hist[11]);
-	}
+	ct_print_timing_stats();
 	uint64_t buckets_pages = (trie->num_buckets * sizeof(ct_bucket)) / HUGEPAGE_SIZE + 1;
 	munmap(trie->buckets, buckets_pages * HUGEPAGE_SIZE);
 	free(trie);
