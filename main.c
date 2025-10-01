@@ -2352,12 +2352,22 @@ cuckoo_trie* ct_alloc(uint64_t num_cells) {
 
 void ct_free(cuckoo_trie* trie) {
 	if (scalar_by_color_call_count > 0) {
-		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average\n", 
-		       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count);
+		printf("Scalar by_color timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
+		       scalar_by_color_call_count, (double)scalar_by_color_total_cycles / scalar_by_color_call_count,
+		       scalar_by_color_min, scalar_by_color_max);
+		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
+		       scalar_by_color_hist[0], scalar_by_color_hist[1], scalar_by_color_hist[2], scalar_by_color_hist[3],
+		       scalar_by_color_hist[4], scalar_by_color_hist[5], scalar_by_color_hist[6], scalar_by_color_hist[7],
+		       scalar_by_color_hist[8], scalar_by_color_hist[9], scalar_by_color_hist[10], scalar_by_color_hist[11]);
 	}
 	if (scalar_by_parent_call_count > 0) {
-		printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average\n", 
-		       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count);
+		printf("Scalar by_parent timing: %lu calls, %.2f cycles/call average, min: %lu, max: %lu\n", 
+		       scalar_by_parent_call_count, (double)scalar_by_parent_total_cycles / scalar_by_parent_call_count,
+		       scalar_by_parent_min, scalar_by_parent_max);
+		printf("Distribution: <50:%lu 50-100:%lu 100-150:%lu 150-200:%lu 200-250:%lu 250-300:%lu 300-350:%lu 350-400:%lu 400-450:%lu 450-500:%lu 500-550:%lu 550+:%lu\n",
+		       scalar_by_parent_hist[0], scalar_by_parent_hist[1], scalar_by_parent_hist[2], scalar_by_parent_hist[3],
+		       scalar_by_parent_hist[4], scalar_by_parent_hist[5], scalar_by_parent_hist[6], scalar_by_parent_hist[7],
+		       scalar_by_parent_hist[8], scalar_by_parent_hist[9], scalar_by_parent_hist[10], scalar_by_parent_hist[11]);
 	}
 	uint64_t buckets_pages = (trie->num_buckets * sizeof(ct_bucket)) / HUGEPAGE_SIZE + 1;
 	munmap(trie->buckets, buckets_pages * HUGEPAGE_SIZE);
