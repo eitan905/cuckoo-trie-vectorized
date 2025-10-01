@@ -23,6 +23,11 @@ static uint64_t find_by_parent_hist[HIST_BINS] = {0};
 static uint64_t find_by_color_min = UINT64_MAX, find_by_color_max = 0;
 static uint64_t find_by_parent_min = UINT64_MAX, find_by_parent_max = 0;
 
+// Bucket and cell tracking for find_by_parent
+static uint64_t find_by_parent_primary_bucket = 0;
+static uint64_t find_by_parent_secondary_bucket = 0;
+static uint64_t find_by_parent_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found"
+
 static inline uint64_t rdtsc_timing() {
     uint32_t lo, hi;
     __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
@@ -340,6 +345,13 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	}
 
 	if (i == CUCKOO_BUCKET_SIZE) {
+		// Track bucket type for failed searches
+		if (is_secondary) {
+			find_by_parent_secondary_bucket++;
+		} else {
+			find_by_parent_primary_bucket++;
+		}
+		find_by_parent_cell_counts[4]++; // not found
 		return NULL;
 	}
 
@@ -353,6 +365,14 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 #endif
 
 	result->last_pos = &(bucket->cells[i]);
+	
+	// Track bucket type and cell for successful searches
+	if (is_secondary) {
+		find_by_parent_secondary_bucket++;
+	} else {
+		find_by_parent_primary_bucket++;
+	}
+	find_by_parent_cell_counts[i]++; // cell 0,1,2,3
 	
 	uint64_t cycles = rdtsc_stop() - start_cycles;
 	find_by_parent_total_cycles += cycles;
@@ -2389,6 +2409,31 @@ static void print_histogram_section(
     }
 }
 
+static void print_bucket_cell_stats(const char *prefix) {
+    uint64_t total_calls = find_by_parent_primary_bucket + find_by_parent_secondary_bucket;
+    if (total_calls == 0) return;
+    
+    printf("\n===== %s Bucket/Cell Distribution =====\n", prefix);
+    printf("Total find_by_parent calls: %lu\n", total_calls);
+    printf("Primary bucket: %lu (%.1f%%)\n", find_by_parent_primary_bucket, 
+           100.0 * find_by_parent_primary_bucket / total_calls);
+    printf("Secondary bucket: %lu (%.1f%%)\n", find_by_parent_secondary_bucket,
+           100.0 * find_by_parent_secondary_bucket / total_calls);
+    
+    uint64_t total_cells = find_by_parent_cell_counts[0] + find_by_parent_cell_counts[1] + 
+                          find_by_parent_cell_counts[2] + find_by_parent_cell_counts[3] + 
+                          find_by_parent_cell_counts[4];
+    if (total_cells > 0) {
+        printf("Cell distribution:\n");
+        for (int i = 0; i < 4; i++) {
+            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_cell_counts[i],
+                   100.0 * find_by_parent_cell_counts[i] / total_cells);
+        }
+        printf("  Not found: %lu (%.1f%%)\n", find_by_parent_cell_counts[4],
+               100.0 * find_by_parent_cell_counts[4] / total_cells);
+    }
+}
+
 void ct_print_timing_stats(void) {
     if (find_by_color_call_count > 0) {
         print_histogram_section(
@@ -2410,6 +2455,7 @@ void ct_print_timing_stats(void) {
             find_by_parent_hist
         );
     }
+    print_bucket_cell_stats("Scalar");
 }
 
 void ct_free(cuckoo_trie* trie) {
