@@ -9,6 +9,7 @@
 #include "random.h"
 #include "main.h"
 #include "util.h"
+#include "timing_helpers.h"
 
 // Global timing variables for scalar version
 static uint64_t find_by_color_total_cycles = 0;
@@ -286,17 +287,8 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	uint64_t cycles = rdtsc_stop() - start_cycles;
-	find_by_color_total_cycles += cycles;
-	find_by_color_call_count++;
-	
-	// Update min/max
-	if (cycles < find_by_color_min) find_by_color_min = cycles;
-	if (cycles > find_by_color_max) find_by_color_max = cycles;
-	
-	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
-	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	find_by_color_hist[bin]++;
+	UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+	                   find_by_color_min, find_by_color_max, find_by_color_hist);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -374,17 +366,8 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	}
 	find_by_parent_cell_counts[i]++; // cell 0,1,2,3
 	
-	uint64_t cycles = rdtsc_stop() - start_cycles;
-	find_by_parent_total_cycles += cycles;
-	find_by_parent_call_count++;
-	
-	// Update min/max
-	if (cycles < find_by_parent_min) find_by_parent_min = cycles;
-	if (cycles > find_by_parent_max) find_by_parent_max = cycles;
-	
-	// Update histogram: bins are 50-100, 100-150, ..., 500-550, 550+
-	int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? HIST_BINS-1 : (cycles - 50) / 50);
-	find_by_parent_hist[bin]++;
+	UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+	                           find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -2406,6 +2389,13 @@ static void print_histogram_section(
 
         double pct = (calls > 0) ? (100.0 * (double)hist[i] / (double)calls) : 0.0;
         printf("%-10s %12lu %9.2f%%  |%s|\n", label, hist[i], pct, bar);
+    }
+    
+    // Count calls > 5000 cycles (beyond our histogram range)
+    unsigned long calls_over_5000 = (max_cycles > 5000) ? (calls - sum) : 0;
+    if (calls_over_5000 > 0) {
+        double pct_over_5000 = 100.0 * (double)calls_over_5000 / (double)calls;
+        printf("Calls > 5000 cycles: %lu (%.2f%%)\n", calls_over_5000, pct_over_5000);
     }
 }
 
