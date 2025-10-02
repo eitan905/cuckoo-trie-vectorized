@@ -3,15 +3,21 @@
 RESULTS_FILE="vectorization_benchmark_results.txt"
 TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
 RUNS=5
+BENCHMARK_BINARY="./benchmark"
 
 # Parse command line arguments
-while getopts "i:" opt; do
+while getopts "i:v" opt; do
     case $opt in
         i)
             RUNS=$OPTARG
             ;;
+        v)
+            BENCHMARK_BINARY="./benchmark_vectorized"
+            ;;
         \?)
-            echo "Usage: $0 [-i iterations]"
+            echo "Usage: $0 [-i iterations] [-v]"
+            echo "  -i: Number of runs per test (default: 5)"
+            echo "  -v: Use vectorized benchmark binary"
             exit 1
             ;;
     esac
@@ -20,6 +26,7 @@ done
 echo "=== Cuckoo Trie Vectorization Benchmarks ===" | tee $RESULTS_FILE
 echo "Timestamp: $TIMESTAMP" | tee -a $RESULTS_FILE
 echo "Runs per test: $RUNS" | tee -a $RESULTS_FILE
+echo "Benchmark binary: $BENCHMARK_BINARY" | tee -a $RESULTS_FILE
 
 # Check if vectorization is enabled by examining the Makefile
 if grep -q "\-DUSE_VECTORIZED_SEARCH" Makefile; then
@@ -63,7 +70,7 @@ for key_size in "${key_sizes[@]}"; do
         
         for ((run=1; run<=RUNS; run++)); do
             echo -n "  Run $run/$RUNS... "
-            output=$(eval "./benchmark $bench $key_size" 2>&1)
+            output=$(eval "$BENCHMARK_BINARY $bench $key_size" 2>&1)
             
             # Extract ops and ms from RESULT line
             result_line=$(echo "$output" | grep "RESULT:")
