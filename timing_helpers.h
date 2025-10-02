@@ -13,7 +13,7 @@
         count++; \
         if (cycles < min) min = cycles; \
         if (cycles > max) max = cycles; \
-        int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? 11 : (cycles - 50) / 50); \
+        int bin = (cycles < 50) ? 0 : ((cycles >= 5000) ? 12 : (cycles - 50) / 50); \
         hist[bin]++; \
     } while(0)
 
@@ -23,7 +23,7 @@
         count++; \
         if (cycles < min) min = cycles; \
         if (cycles > max) max = cycles; \
-        int bin = (cycles < 50) ? 0 : ((cycles >= 550) ? 11 : (cycles - 50) / 50); \
+        int bin = (cycles < 50) ? 0 : ((cycles >= 5000) ? 12 : (cycles - 50) / 50); \
         hist[bin]++; \
         if (is_secondary) find_by_parent_secondary_bucket++; \
         else find_by_parent_primary_bucket++; \

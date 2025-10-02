@@ -18,7 +18,7 @@ static uint64_t find_by_parent_total_cycles = 0;
 static uint64_t find_by_parent_call_count = 0;
 
 // Histogram bins: 50-100, 100-150, ..., 500-550, 550+
-#define HIST_BINS 12
+#define HIST_BINS 13
 static uint64_t find_by_color_hist[HIST_BINS] = {0};
 static uint64_t find_by_parent_hist[HIST_BINS] = {0};
 static uint64_t find_by_color_min = UINT64_MAX, find_by_color_max = 0;
@@ -2340,7 +2340,7 @@ static void print_histogram_section(
     uint64_t total_cycles,
     unsigned long min_cycles,
     unsigned long max_cycles,
-    const unsigned long hist[12]
+    const unsigned long hist[13]
 ) {
     if (calls == 0) return;
 
@@ -2349,7 +2349,7 @@ static void print_histogram_section(
 
     // Sum and find the largest bin for scaling the bar chart
     unsigned long max_bin = 0, sum = 0;
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < 13; ++i) {
         sum += hist[i];
         if (hist[i] > max_bin) max_bin = hist[i];
     }
@@ -2364,12 +2364,12 @@ static void print_histogram_section(
     printf("---------------------------------------------------------------\n");
 
     // Helper to print range label
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < 13; ++i) {
         char label[16];
         if (i == 0) {
             snprintf(label, sizeof(label), "<50");
-        } else if (i == 11) {
-            snprintf(label, sizeof(label), "550+");
+        } else if (i == 12) {
+            snprintf(label, sizeof(label), "5000+");
         } else {
             int low  = 50 * i;
             int high = 50 * (i + 1);
@@ -2391,12 +2391,6 @@ static void print_histogram_section(
         printf("%-10s %12lu %9.2f%%  |%s|\n", label, hist[i], pct, bar);
     }
     
-    // Count calls > 5000 cycles (beyond our histogram range)
-    unsigned long calls_over_5000 = (max_cycles > 5000) ? (calls - sum) : 0;
-    if (calls_over_5000 > 0) {
-        double pct_over_5000 = 100.0 * (double)calls_over_5000 / (double)calls;
-        printf("Calls > 5000 cycles: %lu (%.2f%%)\n", calls_over_5000, pct_over_5000);
-    }
 }
 
 static void print_bucket_cell_stats(const char *prefix) {
