@@ -243,7 +243,7 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
-	uint64_t start_cycles = rdtsc_start();
+	// uint64_t start_cycles = rdtsc_start();
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -287,8 +287,8 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-	                   find_by_color_min, find_by_color_max, find_by_color_hist);
+	// UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+	//                    find_by_color_min, find_by_color_max, find_by_color_hist);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -298,7 +298,7 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 												 ct_entry_local_copy* result, uint64_t is_secondary,
 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	uint64_t start_cycles = rdtsc_start();
+	// uint64_t start_cycles = rdtsc_start();
 	int i;
 
 	uint64_t header_mask = 0;
@@ -338,12 +338,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	if (i == CUCKOO_BUCKET_SIZE) {
 		// Track bucket type for failed searches
-		if (is_secondary) {
-			find_by_parent_secondary_bucket++;
-		} else {
-			find_by_parent_primary_bucket++;
-		}
-		find_by_parent_cell_counts[4]++; // not found
+		// if (is_secondary) {
+		// 	find_by_parent_secondary_bucket++;
+		// } else {
+		// 	find_by_parent_primary_bucket++;
+		// }
+		// find_by_parent_cell_counts[4]++; // not found
 		return NULL;
 	}
 
@@ -359,15 +359,15 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	result->last_pos = &(bucket->cells[i]);
 	
 	// Track bucket type and cell for successful searches
-	if (is_secondary) {
-		find_by_parent_secondary_bucket++;
-	} else {
-		find_by_parent_primary_bucket++;
-	}
-	find_by_parent_cell_counts[i]++; // cell 0,1,2,3
+	// if (is_secondary) {
+	// 	find_by_parent_secondary_bucket++;
+	// } else {
+	// 	find_by_parent_primary_bucket++;
+	// }
+	// find_by_parent_cell_counts[i]++; // cell 0,1,2,3
 	
-	UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-	                           find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+	// UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+	//                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();

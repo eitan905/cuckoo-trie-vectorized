@@ -50,10 +50,9 @@ benchmarks=(
     "ycsb-c"
     "ycsb-d"
     "insert"
-    "range-read"
 )
 
-key_sizes=("rand-8")
+key_sizes=("rand-8" "rand-64" "rand-256")
 
 declare -A results
 
@@ -95,6 +94,7 @@ for key_size in "${key_sizes[@]}"; do
             results["${bench}_${key_size}"]="N/A"
         fi
         echo
+        sleep 1
     done
 done
 
@@ -102,7 +102,7 @@ echo "========================================" | tee -a $RESULTS_FILE
 echo "AVERAGE PERFORMANCE SUMMARY (Mops/s)" | tee -a $RESULTS_FILE
 echo "Average of $RUNS runs per test" | tee -a $RESULTS_FILE
 echo "========================================" | tee -a $RESULTS_FILE
-printf "%-25s %-12s %-12s %-12s\n" "Benchmark" "rand-8" "rand-16" "rand-32" | tee -a $RESULTS_FILE
+printf "%-25s %-12s %-12s %-12s\n" "Benchmark" "rand-8" "rand-64" "rand-256" | tee -a $RESULTS_FILE
 echo "---------------------------------------------------------------------" | tee -a $RESULTS_FILE
 
 for bench in "${benchmarks[@]}"; do

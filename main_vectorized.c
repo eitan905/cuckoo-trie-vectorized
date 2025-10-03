@@ -355,20 +355,24 @@ void ct_print_timing_stats(void) {
 ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
                                                            ct_entry_local_copy* result, uint64_t is_secondary,
                                                            uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-    uint64_t start_cycles = rdtsc_start();
+    // uint64_t start_cycles = rdtsc_start();
 
-    // --- your original mask/value build (unchanged) ---
-    uint64_t header_mask = 0, header_values = 0;
-    header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
-    header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
-    header_mask |= 0xFFULL << (8*offsetof(ct_entry, last_symbol));
-    header_values |= last_symbol << (8*offsetof(ct_entry, last_symbol));
-    const uint64_t parent_color_mask = (0xFFULL << PARENT_COLOR_SHIFT) & 0xFF;
-    header_mask |= parent_color_mask << (8*offsetof(ct_entry, parent_color_and_flags));
-    header_values |= parent_color << (8*offsetof(ct_entry, parent_color_and_flags) + PARENT_COLOR_SHIFT);
-    header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-    if (is_secondary)
-        header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+    uint64_t header_mask = 0;
+	uint64_t header_values = 0;
+
+	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
+
+	header_mask |= 0xFFULL << (8*offsetof(ct_entry, last_symbol));
+	header_values |= last_symbol << (8*offsetof(ct_entry, last_symbol));
+
+	const uint64_t parent_color_mask = (0xFFULL << PARENT_COLOR_SHIFT) & 0xFF;
+	header_mask |= parent_color_mask << (8*offsetof(ct_entry, parent_color_and_flags));
+	header_values |= parent_color << (8*offsetof(ct_entry, parent_color_and_flags) + PARENT_COLOR_SHIFT);
+
+	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+	if (is_secondary)
+		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
 
     // --- cheap tag-only prefilter (one byte) ---
     const size_t OFF_CAT = offsetof(ct_entry, color_and_tag);
@@ -391,30 +395,30 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
         if ((h0 & header_mask) == header_values) {
             read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
-#ifdef MULTITHREADING
-            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-            result->last_seq = start_counter;
-#endif
+			#ifdef MULTITHREADING
+						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+						result->last_seq = start_counter;
+			#endif
             result->last_pos = &(bucket->cells[0]);
             
             // Track bucket type and cell for successful searches
-            UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-                                       find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
+            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
             return result->last_pos;
         }
     }
     if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
         if ((h1 & header_mask) == header_values) {
             read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
-#ifdef MULTITHREADING
-            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-            result->last_seq = start_counter;
-#endif
+			#ifdef MULTITHREADING
+						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+						result->last_seq = start_counter;
+			#endif
             result->last_pos = &(bucket->cells[1]);
             
             // Track bucket type and cell for successful searches
-            UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-                                       find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
+            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
             return result->last_pos;
         }
     }
@@ -426,57 +430,59 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) {
         if ((h2 & header_mask) == header_values) {
             read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
-#ifdef MULTITHREADING
-            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-            result->last_seq = start_counter;
-#endif
+			#ifdef MULTITHREADING
+						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+						result->last_seq = start_counter;
+			#endif
             result->last_pos = &(bucket->cells[2]);
             
             // Track bucket type and cell for successful searches
-            UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-                                       find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 2);
+            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 2);
             return result->last_pos;
         }
     }
     if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) {
         if ((h3 & header_mask) == header_values) {
             read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
-#ifdef MULTITHREADING
-            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-            result->last_seq = start_counter;
-#endif
+			#ifdef MULTITHREADING
+				if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+				result->last_seq = start_counter;
+			#endif
             result->last_pos = &(bucket->cells[3]);
             
             // Track bucket type and cell for successful searches
-            UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-                                       find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 3);
+            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 3);
             return result->last_pos;
         }
     }
 
     // Track bucket type for failed searches
-    if (is_secondary) {
-        find_by_parent_secondary_bucket++;
-    } else {
-        find_by_parent_primary_bucket++;
-    }
-    find_by_parent_cell_counts[4]++; // not found
+    // if (is_secondary) {
+    //     find_by_parent_secondary_bucket++;
+    // } else {
+    //     find_by_parent_primary_bucket++;
+    // }
+    // find_by_parent_cell_counts[4]++; // not found
 
     return NULL;
 }
 
 
 
-// ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
-// 												 ct_entry_local_copy* result, uint64_t is_secondary,
-// 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-// 	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
-// }
 
 ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 												 ct_entry_local_copy* result, uint64_t is_secondary,
 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	uint64_t start_cycles = rdtsc_start();
+	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
+}
+
+
+ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
+												 ct_entry_local_copy* result, uint64_t is_secondary,
+												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+	// uint64_t start_cycles = rdtsc_start();
 	int i;
 
 	uint64_t header_mask = 0;
@@ -516,12 +522,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	if (i == CUCKOO_BUCKET_SIZE) {
 		// Track bucket type for failed searches
-		if (is_secondary) {
-			find_by_parent_secondary_bucket++;
-		} else {
-			find_by_parent_primary_bucket++;
-		}
-		find_by_parent_cell_counts[4]++; // not found
+		// if (is_secondary) {
+		// 	find_by_parent_secondary_bucket++;
+		// } else {
+		// 	find_by_parent_primary_bucket++;
+		// }
+		// find_by_parent_cell_counts[4]++; // not found
 		return NULL;
 	}
 
@@ -536,8 +542,8 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-	                           find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+	// UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+	//                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -545,10 +551,10 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 }
 
 
-ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
+ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
                                                           ct_entry_local_copy* result, uint64_t is_secondary,
                                                           uint64_t tag, uint64_t color) {
-    uint64_t start_cycles = rdtsc_start();
+    // uint64_t start_cycles = rdtsc_start();
 
     // ---- keep your original mask/value construction EXACTLY as-is ----
     uint64_t header_mask = 0;
@@ -595,8 +601,8 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
         result->last_pos = &(bucket->cells[i]);
 
         // ---- your stats (unchanged) ----
-        UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                           find_by_color_min, find_by_color_max, find_by_color_hist);
+        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
         return result->last_pos;
     }
 
@@ -621,16 +627,23 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
     result->last_pos = &(bucket->cells[i]);
 
     // ---- your stats (unchanged) ----
-    UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                       find_by_color_min, find_by_color_max, find_by_color_hist);
+    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
     return result->last_pos;
 }
 
 
+
+ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
+												ct_entry_local_copy* result, uint64_t is_secondary,
+												uint64_t tag, uint64_t color) {
+	return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
+}
+
 ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
-	uint64_t start_cycles = rdtsc_start();
+	// uint64_t start_cycles = rdtsc_start();
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -674,8 +687,8 @@ ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-	                   find_by_color_min, find_by_color_max, find_by_color_hist);
+	// UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+	//                    find_by_color_min, find_by_color_max, find_by_color_hist);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
