@@ -590,55 +590,83 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
     assert(bucket->write_lock_and_seq == 0);
 #endif
 
-    // ---- pairwise check: [0,1] first, then [2,3] if needed ----
-    // Load headers 0,1
+    // ---- prefilter all 4 cells ----
     uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
     uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
+    uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
+    uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
 
-    // Fast scalar prefilter check
     uint8_t prefilter_mask = 0;
     if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) prefilter_mask |= 1;
     if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) prefilter_mask |= 2;
-    
-    switch (prefilter_mask) {
+    if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) prefilter_mask |= 4;
+    if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) prefilter_mask |= 8;
+
+    int count = __builtin_popcount(prefilter_mask);
+    switch (count) {
         case 0:
-            // No cells passed prefilter
-            break;
+            return NULL;
+        
         case 1:
-            // Only cell 0 passed - scalar check
-            if ((h0 & header_mask) == header_values) {
-                read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
+            // Single cell - scalar check
+            if (prefilter_mask & 1) {
+                if ((h0 & header_mask) == header_values) {
+                    read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
 #ifdef MULTITHREADING
-                if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-                    return NULL;
-                result->last_seq = start_counter;
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
 #endif
-                result->last_pos = &(bucket->cells[0]);
-                // ---- your stats (unchanged) ----
-                // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                return result->last_pos;
+                    result->last_pos = &(bucket->cells[0]);
+                    // ---- your stats (unchanged) ----
+                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                    return result->last_pos;
+                }
+            } else if (prefilter_mask & 2) {
+                if ((h1 & header_mask) == header_values) {
+                    read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[1]);
+                    // ---- your stats (unchanged) ----
+                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                    return result->last_pos;
+                }
+            } else if (prefilter_mask & 4) {
+                if ((h2 & header_mask) == header_values) {
+                    read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[2]);
+                    // ---- your stats (unchanged) ----
+                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                    return result->last_pos;
+                }
+            } else if (prefilter_mask & 8) {
+                if ((h3 & header_mask) == header_values) {
+                    read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[3]);
+                    // ---- your stats (unchanged) ----
+                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                    return result->last_pos;
+                }
             }
-            break;
+            return NULL;
+
         case 2:
-            // Only cell 1 passed - scalar check
-            if ((h1 & header_mask) == header_values) {
-                read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
-#ifdef MULTITHREADING
-                if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-                    return NULL;
-                result->last_seq = start_counter;
-#endif
-                result->last_pos = &(bucket->cells[1]);
-                // ---- your stats (unchanged) ----
-                // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                return result->last_pos;
-            }
-            break;
-        case 3:
-            // Both cells passed - use SIMD
-            {
+            // Two cells - use 2-wide SIMD if adjacent pairs, otherwise scalar
+            if (prefilter_mask == 3) { // cells 0,1
                 __m128i mask128 = _mm_set1_epi64x((long long)header_mask);
                 __m128i vals128 = _mm_set1_epi64x((long long)header_values);
                 __m128i headers01 = _mm_set_epi64x((long long)h1, (long long)h0);
@@ -646,11 +674,10 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
                 unsigned m01 = (unsigned)_mm_movemask_epi8(cmp01);
                 
                 if (m01 != 0) {
-                    int i = (int)(__builtin_ctz(m01) >> 3);   // 0 or 1
+                    int i = (int)(__builtin_ctz(m01) >> 3);
                     read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
 #ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-                        return NULL;
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
                     result->last_seq = start_counter;
 #endif
                     result->last_pos = &(bucket->cells[i]);
@@ -659,58 +686,7 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
                     //                    find_by_color_min, find_by_color_max, find_by_color_hist);
                     return result->last_pos;
                 }
-            }
-            break;
-    }
-
-    // Not found in [0,1] → check [2,3]
-    uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
-    uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
-
-    // Fast scalar prefilter check for [2,3]
-    prefilter_mask = 0;
-    if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) prefilter_mask |= 1;
-    if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) prefilter_mask |= 2;
-    
-    switch (prefilter_mask) {
-        case 0:
-            // No cells passed prefilter
-            return NULL;
-        case 1:
-            // Only cell 2 passed - scalar check
-            if ((h2 & header_mask) == header_values) {
-                read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
-#ifdef MULTITHREADING
-                if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-                    return NULL;
-                result->last_seq = start_counter;
-#endif
-                result->last_pos = &(bucket->cells[2]);
-                // ---- your stats (unchanged) ----
-                // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                return result->last_pos;
-            }
-            return NULL;
-        case 2:
-            // Only cell 3 passed - scalar check
-            if ((h3 & header_mask) == header_values) {
-                read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
-#ifdef MULTITHREADING
-                if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-                    return NULL;
-                result->last_seq = start_counter;
-#endif
-                result->last_pos = &(bucket->cells[3]);
-                // ---- your stats (unchanged) ----
-                // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                return result->last_pos;
-            }
-            return NULL;
-        case 3:
-            // Both cells passed - use SIMD
-            {
+            } else if (prefilter_mask == 12) { // cells 2,3
                 __m128i mask128 = _mm_set1_epi64x((long long)header_mask);
                 __m128i vals128 = _mm_set1_epi64x((long long)header_values);
                 __m128i headers23 = _mm_set_epi64x((long long)h3, (long long)h2);
@@ -718,11 +694,100 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
                 unsigned m23 = (unsigned)_mm_movemask_epi8(cmp23);
                 
                 if (m23 != 0) {
-                    int i = 2 + (int)(__builtin_ctz(m23) >> 3);   // 2 or 3
+                    int i = 2 + (int)(__builtin_ctz(m23) >> 3);
                     read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
 #ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-                        return NULL;
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[i]);
+                    // ---- your stats (unchanged) ----
+                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                    return result->last_pos;
+                }
+            } else {
+                // Non-adjacent pairs - use scalar checks
+                if (prefilter_mask & 1) {
+                    if ((h0 & header_mask) == header_values) {
+                        read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
+#ifdef MULTITHREADING
+                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                        result->last_seq = start_counter;
+#endif
+                        result->last_pos = &(bucket->cells[0]);
+                        // ---- your stats (unchanged) ----
+                        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                        return result->last_pos;
+                    }
+                }
+                if (prefilter_mask & 2) {
+                    if ((h1 & header_mask) == header_values) {
+                        read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
+#ifdef MULTITHREADING
+                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                        result->last_seq = start_counter;
+#endif
+                        result->last_pos = &(bucket->cells[1]);
+                        // ---- your stats (unchanged) ----
+                        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                        return result->last_pos;
+                    }
+                }
+                if (prefilter_mask & 4) {
+                    if ((h2 & header_mask) == header_values) {
+                        read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
+#ifdef MULTITHREADING
+                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                        result->last_seq = start_counter;
+#endif
+                        result->last_pos = &(bucket->cells[2]);
+                        // ---- your stats (unchanged) ----
+                        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                        return result->last_pos;
+                    }
+                }
+                if (prefilter_mask & 8) {
+                    if ((h3 & header_mask) == header_values) {
+                        read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
+#ifdef MULTITHREADING
+                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                        result->last_seq = start_counter;
+#endif
+                        result->last_pos = &(bucket->cells[3]);
+                        // ---- your stats (unchanged) ----
+                        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+                        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+                        return result->last_pos;
+                    }
+                }
+            }
+            return NULL;
+
+        case 3:
+        case 4:
+            // 3 or 4 cells - use 4-wide AVX2 SIMD
+            {
+                __m256i mask256 = _mm256_set1_epi64x((long long)header_mask);
+                __m256i vals256 = _mm256_set1_epi64x((long long)header_values);
+                __m256i headers = _mm256_set_epi64x((long long)h3, (long long)h2, (long long)h1, (long long)h0);
+                __m256i cmp = _mm256_cmpeq_epi64(_mm256_and_si256(headers, mask256), vals256);
+                unsigned m = (unsigned)_mm256_movemask_epi8(cmp);
+                
+                // Mask out results that didn't pass prefilter
+                if (!(prefilter_mask & 1)) m &= ~0x000000FF; // clear bits for h0
+                if (!(prefilter_mask & 2)) m &= ~0x0000FF00; // clear bits for h1
+                if (!(prefilter_mask & 4)) m &= ~0x00FF0000; // clear bits for h2
+                if (!(prefilter_mask & 8)) m &= ~0xFF000000; // clear bits for h3
+                
+                if (m != 0) {
+                    int i = (int)(__builtin_ctz(m) >> 3);
+                    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
                     result->last_seq = start_counter;
 #endif
                     result->last_pos = &(bucket->cells[i]);
@@ -734,6 +799,8 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
             }
             return NULL;
     }
+
+    return NULL;
 }
 
 
