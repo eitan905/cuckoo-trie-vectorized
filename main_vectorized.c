@@ -13,6 +13,12 @@
 #include "util.h"
 #include "timing_helpers.h"
 
+// Compile-time constants to avoid runtime calculations
+#define TAG_MASK_VALUE ((1ULL << TAG_BITS) - 1)
+#define PARENT_COLOR_MASK_VALUE ((0xFFULL << PARENT_COLOR_SHIFT) & 0xFF)
+#define COLOR_MASK_VALUE ((0xFF << TAG_BITS) & 0xFF)
+#define NUM_PAIRS_MULTIPLIER (1ULL << TAG_BITS)
+
 // The root has to have a last symbol in order to have an alternate bucket.
 // The following value was arbitrarily chosen.
 #define ROOT_LAST_SYMBOL 0
@@ -360,13 +366,13 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
-	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+	header_mask |= TAG_MASK_VALUE << (8*offsetof(ct_entry, color_and_tag));
 	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
 
 	header_mask |= 0xFFULL << (8*offsetof(ct_entry, last_symbol));
 	header_values |= last_symbol << (8*offsetof(ct_entry, last_symbol));
 
-	const uint64_t parent_color_mask = (0xFFULL << PARENT_COLOR_SHIFT) & 0xFF;
+	const uint64_t parent_color_mask = PARENT_COLOR_MASK_VALUE;
 	header_mask |= parent_color_mask << (8*offsetof(ct_entry, parent_color_and_flags));
 	header_values |= parent_color << (8*offsetof(ct_entry, parent_color_and_flags) + PARENT_COLOR_SHIFT);
 
@@ -376,7 +382,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
     // --- cheap tag-only prefilter (one byte) ---
     const size_t OFF_CAT = offsetof(ct_entry, color_and_tag);
-    const uint64_t tag_low_mask = ((1ULL << TAG_BITS) - 1);
+    const uint64_t tag_low_mask = TAG_MASK_VALUE;
     const uint64_t tag_mask64   = tag_low_mask << (8 * OFF_CAT);
     const uint64_t tag_value64  = (tag & tag_low_mask) << (8 * OFF_CAT);
 
@@ -560,10 +566,10 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
     uint64_t header_mask = 0;
     uint64_t header_values = 0;
 
-    header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
+    header_mask |= TAG_MASK_VALUE << (8*offsetof(ct_entry, color_and_tag));
     header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
 
-    header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
+    header_mask |= COLOR_MASK_VALUE << (8*offsetof(ct_entry, color_and_tag));
     header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
 
     header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
@@ -2741,7 +2747,7 @@ cuckoo_trie* ct_alloc(uint64_t num_cells) {
 	// The last bucket in the allocation is for the min_leaf bucket
 	result->min_leaf_bucket = &(buckets[num_buckets]);
 	result->num_buckets = num_buckets;
-	result->num_pairs = num_buckets * (1ULL << TAG_BITS);
+	result->num_pairs = num_buckets * NUM_PAIRS_MULTIPLIER;
 
 	result->num_shuffle_blocks = result->num_pairs >> BITS_PER_SYMBOL;
 
