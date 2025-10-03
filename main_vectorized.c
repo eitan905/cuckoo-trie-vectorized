@@ -576,6 +576,12 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
     if (is_secondary)
         header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
 
+    // --- cheap tag-only prefilter (one byte) ---
+    const size_t OFF_CAT = offsetof(ct_entry, color_and_tag);
+    const uint64_t tag_low_mask = TAG_MASK_VALUE;
+    const uint64_t tag_mask64   = tag_low_mask << (8 * OFF_CAT);
+    const uint64_t tag_value64  = (tag & tag_low_mask) << (8 * OFF_CAT);
+
 #ifdef MULTITHREADING
     uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
     if (start_counter & SEQ_INCREMENT)
@@ -584,58 +590,74 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
     assert(bucket->write_lock_and_seq == 0);
 #endif
 
-    // ---- pairwise check: [0,1] first, then [2,3] if needed ----
-    __m128i mask128 = _mm_set1_epi64x((long long)header_mask);
-    __m128i vals128 = _mm_set1_epi64x((long long)header_values);
-
-    // Load headers 0,1
+    // ---- pair [0,1] ----
     uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
     uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
 
-    __m128i headers01 = _mm_set_epi64x((long long)h1, (long long)h0);
-    __m128i cmp01     = _mm_cmpeq_epi64(_mm_and_si128(headers01, mask128), vals128);
-    unsigned m01      = (unsigned)_mm_movemask_epi8(cmp01);
-
-    if (__builtin_expect(m01 != 0u, 1)) {
-        int i = (int)(__builtin_ctz(m01) >> 3);   // 0 or 1
-        read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+    // skip empty quickly (TYPE_UNUSED == 0; TYPE_MASK selects type in byte 0)
+    if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
+        if ((h0 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
 #ifdef MULTITHREADING
-        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-            return NULL;
-        result->last_seq = start_counter;
+            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+            result->last_seq = start_counter;
 #endif
-        result->last_pos = &(bucket->cells[i]);
-
-        // ---- your stats (unchanged) ----
-        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-        return result->last_pos;
+            result->last_pos = &(bucket->cells[0]);
+            // ---- your stats (unchanged) ----
+            // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+            //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+            return result->last_pos;
+        }
+    }
+    if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
+        if ((h1 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
+#ifdef MULTITHREADING
+            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+            result->last_seq = start_counter;
+#endif
+            result->last_pos = &(bucket->cells[1]);
+            // ---- your stats (unchanged) ----
+            // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+            //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+            return result->last_pos;
+        }
     }
 
-    // Not found in [0,1] → check [2,3]
+    // ---- pair [2,3] ----
     uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
     uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
 
-    __m128i headers23 = _mm_set_epi64x((long long)h3, (long long)h2);
-    __m128i cmp23     = _mm_cmpeq_epi64(_mm_and_si128(headers23, mask128), vals128);
-    unsigned m23      = (unsigned)_mm_movemask_epi8(cmp23);
-
-    if (__builtin_expect(m23 == 0u, 1))
-        return NULL;
-
-    int i = 2 + (int)(__builtin_ctz(m23) >> 3);   // 2 or 3
-    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+    if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) {
+        if ((h2 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
 #ifdef MULTITHREADING
-    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
-        return NULL;
-    result->last_seq = start_counter;
+            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+            result->last_seq = start_counter;
 #endif
-    result->last_pos = &(bucket->cells[i]);
+            result->last_pos = &(bucket->cells[2]);
+            // ---- your stats (unchanged) ----
+            // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+            //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+            return result->last_pos;
+        }
+    }
+    if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) {
+        if ((h3 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
+#ifdef MULTITHREADING
+            if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+            result->last_seq = start_counter;
+#endif
+            result->last_pos = &(bucket->cells[3]);
+            // ---- your stats (unchanged) ----
+            // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+            //                    find_by_color_min, find_by_color_max, find_by_color_hist);
+            return result->last_pos;
+        }
+    }
 
-    // ---- your stats (unchanged) ----
-    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-    return result->last_pos;
+    return NULL;
 }
 
 
