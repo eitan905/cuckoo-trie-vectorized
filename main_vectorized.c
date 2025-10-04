@@ -84,7 +84,7 @@ uint64_t unmix_bucket(cuckoo_trie* trie, uint64_t bucket_num, uint64_t tag) {
 	return result;
 }
 
-uint64_t accumulate_hash(cuckoo_trie* trie, uint64_t x, uint64_t symbol) {
+uint64_t accumulate_hash_vectorized(cuckoo_trie* trie, uint64_t x, uint64_t symbol) {
 	x ^= symbol;
 
 	uint64_t block = x >> BITS_PER_SYMBOL;
@@ -94,6 +94,43 @@ uint64_t accumulate_hash(cuckoo_trie* trie, uint64_t x, uint64_t symbol) {
 
 	assert(result < trie->num_pairs);
 	return result;
+}
+
+// Vectorized version for processing multiple hash accumulations
+void accumulate_hash_batch_vectorized(cuckoo_trie* trie, const uint64_t* x_values, const uint64_t* symbols, uint64_t* results, int count) {
+	const __m256i bits_per_symbol = _mm256_set1_epi64x((long long)BITS_PER_SYMBOL);
+	const __m256i fanout_mask = _mm256_set1_epi64x((long long)(FANOUT - 1));
+	const __m256i num_shuffle_blocks = _mm256_set1_epi64x((long long)trie->num_shuffle_blocks);
+
+	int i = 0;
+	// Process 4 at a time with AVX2
+	for (; i + 3 < count; i += 4) {
+		__m256i x_vec = _mm256_loadu_si256((__m256i*)&x_values[i]);
+		__m256i sym_vec = _mm256_loadu_si256((__m256i*)&symbols[i]);
+		
+		// x ^= symbol
+		x_vec = _mm256_xor_si256(x_vec, sym_vec);
+		
+		// block = x >> BITS_PER_SYMBOL
+		__m256i block_vec = _mm256_srlv_epi64(x_vec, bits_per_symbol);
+		
+		// depth = x & (FANOUT - 1)
+		__m256i depth_vec = _mm256_and_si256(x_vec, fanout_mask);
+		
+		// result = depth * num_shuffle_blocks + block
+		__m256i result_vec = _mm256_add_epi64(_mm256_mullo_epi64(depth_vec, num_shuffle_blocks), block_vec);
+		
+		_mm256_storeu_si256((__m256i*)&results[i], result_vec);
+	}
+	
+	// Handle remaining elements with scalar code
+	for (; i < count; i++) {
+		results[i] = accumulate_hash_vectorized(trie, x_values[i], symbols[i]);
+	}
+}
+
+uint64_t accumulate_hash(cuckoo_trie* trie, uint64_t x, uint64_t symbol) {
+	return accumulate_hash_vectorized(trie, x, symbol);
 }
 
 // Given that <entry> is currently in bucket <bucket_num>, return the other
@@ -2499,27 +2536,63 @@ uint64_t read_qword_zfill(const uint8_t* from, uint64_t size) {
 	return __builtin_ia32_bzhi_di(tmp, 8*size);
 }
 
-void key_to_symbols(const uint8_t* key, uint64_t size, uint8_t* symbols) {
+void key_to_symbols_vectorized(const uint8_t* key, uint64_t size, uint8_t* symbols) {
 	// We have 2**BITS_PER_SYMBOL + 1 different symbols, and each should fit in  a byte
 	assert(BITS_PER_SYMBOL < 8);
 
 	const uint64_t ones = 0x0101010101010101ULL;
+	const __m256i ones_vec = _mm256_set1_epi64x((long long)ones);
+	const __m256i fanout_mask = _mm256_set1_epi64x((long long)(FANOUT - 1));
 
 	int64_t bytes_left = size;
 	const uint8_t* key_ptr = key;
 	uint8_t* next_sym_ptr = symbols;
 
+	// Process 4 qwords at a time with AVX2
+	while (bytes_left >= 4 * BITS_PER_SYMBOL) {
+		// Load 4 qwords
+		__m256i key_qwords = _mm256_set_epi64x(
+			(long long)__builtin_bswap64(read_qword_zfill(key_ptr + 3*BITS_PER_SYMBOL, BITS_PER_SYMBOL)),
+			(long long)__builtin_bswap64(read_qword_zfill(key_ptr + 2*BITS_PER_SYMBOL, BITS_PER_SYMBOL)),
+			(long long)__builtin_bswap64(read_qword_zfill(key_ptr + 1*BITS_PER_SYMBOL, BITS_PER_SYMBOL)),
+			(long long)__builtin_bswap64(read_qword_zfill(key_ptr, BITS_PER_SYMBOL))
+		);
+
+		// Shift all qwords
+		key_qwords = _mm256_srli_epi64(key_qwords, 64 - 8*BITS_PER_SYMBOL);
+
+		// Apply pdep to all 4 qwords in parallel (unfortunately pdep is not vectorized, so we extract)
+		uint64_t qw[4];
+		_mm256_storeu_si256((__m256i*)qw, key_qwords);
+		
+		__m256i results = _mm256_set_epi64x(
+			(long long)(__builtin_bswap64(__builtin_ia32_pdep_di(qw[3], ones * (FANOUT - 1)) + ones)),
+			(long long)(__builtin_bswap64(__builtin_ia32_pdep_di(qw[2], ones * (FANOUT - 1)) + ones)),
+			(long long)(__builtin_bswap64(__builtin_ia32_pdep_di(qw[1], ones * (FANOUT - 1)) + ones)),
+			(long long)(__builtin_bswap64(__builtin_ia32_pdep_di(qw[0], ones * (FANOUT - 1)) + ones))
+		);
+
+		// Store results
+		_mm256_storeu_si256((__m256i*)next_sym_ptr, results);
+		
+		next_sym_ptr += 32; // 4 * 8 bytes
+		key_ptr += 4 * BITS_PER_SYMBOL;
+		bytes_left -= 4 * BITS_PER_SYMBOL;
+	}
+
+	// Handle remaining bytes with original scalar code
 	while (bytes_left > 0) {
 		uint64_t key_qword = __builtin_bswap64(read_qword_zfill(key_ptr, bytes_left));
-
-		// pdep works on the low bits, move key bytes there.
 		key_qword >>= (64 - 8*BITS_PER_SYMBOL);
-
 		*((uint64_t*)next_sym_ptr) = __builtin_bswap64(__builtin_ia32_pdep_di(key_qword, ones * (FANOUT - 1)) + ones);
 		next_sym_ptr += 8;
 		key_ptr += BITS_PER_SYMBOL;
 		bytes_left -= BITS_PER_SYMBOL;
 	}
+}
+
+void key_to_symbols(const uint8_t* key, uint64_t size, uint8_t* symbols) {
+	key_to_symbols_vectorized(key, size, symbols);
 }
 
 typedef struct {
@@ -2532,20 +2605,27 @@ typedef struct {
 	uint64_t num_key_symbols;
 } key_prefetcher;
 
-static inline void prefetcher_start(key_prefetcher* p, cuckoo_trie* trie, uint64_t key_size,
-									uint8_t* key_bytes) {
+static inline void prefetcher_start_vectorized(key_prefetcher* p, cuckoo_trie* trie, uint64_t key_size,
+											   uint8_t* key_bytes) {
 	int i;
 	p->num_key_symbols = (key_size * 8 + BITS_PER_SYMBOL - 1) / BITS_PER_SYMBOL + 1;
-	key_to_symbols(key_bytes, key_size, p->key_symbols);
+	key_to_symbols_vectorized(key_bytes, key_size, p->key_symbols);
 	p->key_symbols[p->num_key_symbols - 1] = SYMBOL_END;
 	p->prefetch_prefix_hash = HASH_START_VALUE;
+	
+	// Process first 4 symbols (sequential dependency prevents full vectorization)
 	for (i = 0; i < 4 && i < p->num_key_symbols; i++) {
 		assert(p->key_symbols[i] == get_string_symbol(key_size, key_bytes, i));
-		p->prefetch_prefix_hash = accumulate_hash(trie, p->prefetch_prefix_hash, p->key_symbols[i]);
+		p->prefetch_prefix_hash = accumulate_hash_vectorized(trie, p->prefetch_prefix_hash, p->key_symbols[i]);
 		p->prefix_hashes[i] = p->prefetch_prefix_hash;
 		prefetch_bucket_pair(trie, hash_to_bucket(p->prefetch_prefix_hash), hash_to_tag(p->prefetch_prefix_hash));
 	}
 	p->prefetch_pos = i;
+}
+
+static inline void prefetcher_start(key_prefetcher* p, cuckoo_trie* trie, uint64_t key_size,
+									uint8_t* key_bytes) {
+	prefetcher_start_vectorized(p, trie, key_size, key_bytes);
 }
 
 static inline void prefetcher_step(key_prefetcher* p, cuckoo_trie* trie) {
