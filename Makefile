@@ -32,7 +32,7 @@ libcuckoo_trie_debug.so: Makefile ${LIB_DEPS}
 	${CC} ${FLAGS} -O1 -fPIC -shared -march=haswell -mavx2 -g -o $@ ${LIB_SOURCES}
 
 test: Makefile ${TEST_DEPS}
-	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ ${TEST_SOURCES} libcuckoo_trie.so -lpthread
+	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ ${TEST_SOURCES} libcuckoo_trie_vectorized.so -lpthread
 
 test_debug: Makefile ${TEST_DEPS}
 	${CC} ${FLAGS} -Wl,-rpath=. -g -DTEST_DEBUG -o $@ ${TEST_SOURCES} libcuckoo_trie_debug.so -lpthread

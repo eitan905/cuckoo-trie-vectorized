@@ -29,6 +29,7 @@ EXPORT ct_kv* ct_iter_next(ct_iter* iter);
 EXPORT ct_iter* ct_iter_alloc(cuckoo_trie* trie);
 EXPORT cuckoo_trie* ct_alloc(uint64_t num_cells);
 EXPORT void ct_free(cuckoo_trie* trie);
+EXPORT void ct_print_timing_stats();
 
 // Internal APIs, for testing only
 EXPORT int ct_verify_trie(cuckoo_trie* trie);
