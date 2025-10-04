@@ -393,75 +393,203 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     assert(bucket->write_lock_and_seq == 0);
 #endif
 
-    // ---- pair [0,1] ----
+    // ---- prefilter all 4 cells ----
     uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
     uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
-
-    // skip empty quickly (TYPE_UNUSED == 0; TYPE_MASK selects type in byte 0)
-    if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
-        if ((h0 & header_mask) == header_values) {
-            read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
-			#ifdef MULTITHREADING
-						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-						result->last_seq = start_counter;
-			#endif
-            result->last_pos = &(bucket->cells[0]);
-            
-            // Track bucket type and cell for successful searches
-            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
-            return result->last_pos;
-        }
-    }
-    if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
-        if ((h1 & header_mask) == header_values) {
-            read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
-			#ifdef MULTITHREADING
-						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-						result->last_seq = start_counter;
-			#endif
-            result->last_pos = &(bucket->cells[1]);
-            
-            // Track bucket type and cell for successful searches
-            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
-            return result->last_pos;
-        }
-    }
-
-    // ---- pair [2,3] ----
     uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
     uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
 
-    if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) {
-        if ((h2 & header_mask) == header_values) {
-            read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
-			#ifdef MULTITHREADING
-						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-						result->last_seq = start_counter;
-			#endif
-            result->last_pos = &(bucket->cells[2]);
-            
-            // Track bucket type and cell for successful searches
-            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 2);
-            return result->last_pos;
-        }
-    }
-    if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) {
-        if ((h3 & header_mask) == header_values) {
-            read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
-			#ifdef MULTITHREADING
-				if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-				result->last_seq = start_counter;
-			#endif
-            result->last_pos = &(bucket->cells[3]);
-            
-            // Track bucket type and cell for successful searches
-            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 3);
-            return result->last_pos;
-        }
+    uint8_t prefilter_mask = 0;
+    if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) prefilter_mask |= 1;
+    if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) prefilter_mask |= 2;
+    if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) prefilter_mask |= 4;
+    if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) prefilter_mask |= 8;
+
+    int count = __builtin_popcount(prefilter_mask);
+    switch (count) {
+        case 0:
+            return NULL;
+        
+        case 1:
+            // Single cell - scalar check
+            if (prefilter_mask & 1) {
+                if ((h0 & header_mask) == header_values) {
+                    read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[0]);
+                    // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                    //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
+                    return result->last_pos;
+                }
+            } else if (prefilter_mask & 2) {
+                if ((h1 & header_mask) == header_values) {
+                    read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[1]);
+                    // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                    //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
+                    return result->last_pos;
+                }
+            } else if (prefilter_mask & 4) {
+                if ((h2 & header_mask) == header_values) {
+                    read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[2]);
+                    // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                    //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 2);
+                    return result->last_pos;
+                }
+            } else if (prefilter_mask & 8) {
+                if ((h3 & header_mask) == header_values) {
+                    read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[3]);
+                    // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                    //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 3);
+                    return result->last_pos;
+                }
+            }
+            return NULL;
+
+        case 2:
+            // Two cells - use 2-wide SIMD if adjacent pairs, otherwise scalar
+            if (prefilter_mask == 3) { // cells 0,1
+                __m128i mask128 = _mm_set1_epi64x((long long)header_mask);
+                __m128i vals128 = _mm_set1_epi64x((long long)header_values);
+                __m128i headers01 = _mm_set_epi64x((long long)h1, (long long)h0);
+                __m128i cmp01 = _mm_cmpeq_epi64(_mm_and_si128(headers01, mask128), vals128);
+                unsigned m01 = (unsigned)_mm_movemask_epi8(cmp01);
+                
+                if (m01 != 0) {
+                    int i = (int)(__builtin_ctz(m01) >> 3);
+                    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[i]);
+                    // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                    //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+                    return result->last_pos;
+                }
+            } else if (prefilter_mask == 12) { // cells 2,3
+                __m128i mask128 = _mm_set1_epi64x((long long)header_mask);
+                __m128i vals128 = _mm_set1_epi64x((long long)header_values);
+                __m128i headers23 = _mm_set_epi64x((long long)h3, (long long)h2);
+                __m128i cmp23 = _mm_cmpeq_epi64(_mm_and_si128(headers23, mask128), vals128);
+                unsigned m23 = (unsigned)_mm_movemask_epi8(cmp23);
+                
+                if (m23 != 0) {
+                    int i = 2 + (int)(__builtin_ctz(m23) >> 3);
+                    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[i]);
+                    // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                    //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+                    return result->last_pos;
+                }
+            } else {
+                // Non-adjacent pairs - use scalar checks
+                if (prefilter_mask & 1) {
+                    if ((h0 & header_mask) == header_values) {
+                        read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
+#ifdef MULTITHREADING
+                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                        result->last_seq = start_counter;
+#endif
+                        result->last_pos = &(bucket->cells[0]);
+                        // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                        //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
+                        return result->last_pos;
+                    }
+                }
+                if (prefilter_mask & 2) {
+                    if ((h1 & header_mask) == header_values) {
+                        read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
+#ifdef MULTITHREADING
+                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                        result->last_seq = start_counter;
+#endif
+                        result->last_pos = &(bucket->cells[1]);
+                        // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                        //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
+                        return result->last_pos;
+                    }
+                }
+                if (prefilter_mask & 4) {
+                    if ((h2 & header_mask) == header_values) {
+                        read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
+#ifdef MULTITHREADING
+                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                        result->last_seq = start_counter;
+#endif
+                        result->last_pos = &(bucket->cells[2]);
+                        // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                        //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 2);
+                        return result->last_pos;
+                    }
+                }
+                if (prefilter_mask & 8) {
+                    if ((h3 & header_mask) == header_values) {
+                        read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
+#ifdef MULTITHREADING
+                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                        result->last_seq = start_counter;
+#endif
+                        result->last_pos = &(bucket->cells[3]);
+                        // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                        //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 3);
+                        return result->last_pos;
+                    }
+                }
+            }
+            return NULL;
+
+        case 3:
+        case 4:
+            // 3 or 4 cells - use 4-wide AVX2 SIMD
+            {
+                __m256i mask256 = _mm256_set1_epi64x((long long)header_mask);
+                __m256i vals256 = _mm256_set1_epi64x((long long)header_values);
+                __m256i headers = _mm256_set_epi64x((long long)h3, (long long)h2, (long long)h1, (long long)h0);
+                __m256i cmp = _mm256_cmpeq_epi64(_mm256_and_si256(headers, mask256), vals256);
+                unsigned m = (unsigned)_mm256_movemask_epi8(cmp);
+                
+                // Mask out results that didn't pass prefilter
+                if (!(prefilter_mask & 1)) m &= ~0x000000FF; // clear bits for h0
+                if (!(prefilter_mask & 2)) m &= ~0x0000FF00; // clear bits for h1
+                if (!(prefilter_mask & 4)) m &= ~0x00FF0000; // clear bits for h2
+                if (!(prefilter_mask & 8)) m &= ~0xFF000000; // clear bits for h3
+                
+                if (m != 0) {
+                    int i = (int)(__builtin_ctz(m) >> 3);
+                    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+#ifdef MULTITHREADING
+                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+                    result->last_seq = start_counter;
+#endif
+                    result->last_pos = &(bucket->cells[i]);
+                    // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                    //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+                    return result->last_pos;
+                }
+            }
+            return NULL;
     }
 
     // Track bucket type for failed searches
