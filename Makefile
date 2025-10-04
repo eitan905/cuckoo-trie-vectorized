@@ -44,7 +44,7 @@ benchmark_vectorized: Makefile ${TEST_DEPS}
 	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ ${BENCHMARK_SOURCES} libcuckoo_trie_vectorized.so -lpthread -lm
 
 race_test: Makefile race_test.c
-	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ race_test.c libcuckoo_trie.so -lpthread
+	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ race_test.c random.c dataset.c util.c libcuckoo_trie.so -lpthread
 
 race_test_vectorized: Makefile race_test.c
-	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ race_test.c libcuckoo_trie_vectorized.so -lpthread
+	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ race_test.c random.c dataset.c util.c libcuckoo_trie_vectorized.so -lpthread
