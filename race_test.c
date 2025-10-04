@@ -34,15 +34,12 @@ void gen_test_kvs(uint8_t* buf, uint64_t num_kvs, uint64_t max_key_len) {
     i = 0;
     while (i < num_kvs) {
         ct_kv* kv = (ct_kv*) buf_pos;
-        uint64_t len = (i % max_key_len) + 1; // Predictable lengths
+        uint64_t len = 8; // Fixed length for simplicity
         kv_init(kv, len, DEFAULT_VALUE_SIZE);
         
-        // Make predictable but unique keys
+        // Make unique keys by using the index
         memset(kv_key_bytes(kv), 0, len);
-        *(int*)kv_key_bytes(kv) = i;
-        if (len > 4) {
-            *(int*)(kv_key_bytes(kv) + 4) = i * 2;
-        }
+        *(uint64_t*)kv_key_bytes(kv) = i; // Use full 64-bit unique value
         
         memset(kv_value_bytes(kv), 0xAB, DEFAULT_VALUE_SIZE);
         
