@@ -19,9 +19,6 @@
 #define COLOR_MASK_VALUE ((0xFF << TAG_BITS) & 0xFF)
 #define NUM_PAIRS_MULTIPLIER (1ULL << TAG_BITS)
 
-// Branch prediction hint: true if previous search found entry in cell 1
-static bool prev_found_in_cell_1 = false;
-
 // The root has to have a last symbol in order to have an alternate bucket.
 // The following value was arbitrarily chosen.
 #define ROOT_LAST_SYMBOL 0
@@ -98,7 +95,6 @@ uint64_t accumulate_hash(cuckoo_trie* trie, uint64_t x, uint64_t symbol) {
 	assert(result < trie->num_pairs);
 	return result;
 }
-
 
 // Given that <entry> is currently in bucket <bucket_num>, return the other
 // bucket in which <entry> can be stored.
@@ -397,76 +393,39 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     assert(bucket->write_lock_and_seq == 0);
 #endif
 
-    // ---- adaptive approach: check cell 1 first if previous search found it there ----
-    uint64_t h0, h1;
-    
-    if (prev_found_in_cell_1) {
-        // Check cell 1 first based on prediction
-        h1 = *(const uint64_t*)&bucket->cells[1];
-        if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
-            if ((h1 & header_mask) == header_values) {
-                read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
-#ifdef MULTITHREADING
-                if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                result->last_seq = start_counter;
-#endif
-                result->last_pos = &(bucket->cells[1]);
-                prev_found_in_cell_1 = true; // Reinforce prediction
-                // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-                //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
-                return result->last_pos;
-            }
+    // ---- pair [0,1] ----
+    uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
+    uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
+
+    // skip empty quickly (TYPE_UNUSED == 0; TYPE_MASK selects type in byte 0)
+    if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
+        if ((h0 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
+			#ifdef MULTITHREADING
+						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+						result->last_seq = start_counter;
+			#endif
+            result->last_pos = &(bucket->cells[0]);
+            
+            // Track bucket type and cell for successful searches
+            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
+            return result->last_pos;
         }
-        
-        // Cell 1 failed, now check cell 0
-        h0 = *(const uint64_t*)&bucket->cells[0];
-        if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
-            if ((h0 & header_mask) == header_values) {
-                read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
-#ifdef MULTITHREADING
-                if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                result->last_seq = start_counter;
-#endif
-                result->last_pos = &(bucket->cells[0]);
-                prev_found_in_cell_1 = false; // Update prediction
-                // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-                //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
-                return result->last_pos;
-            }
-        }
-    } else {
-        // Check cell 0 first (normal case)
-        h0 = *(const uint64_t*)&bucket->cells[0];
-        if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
-            if ((h0 & header_mask) == header_values) {
-                read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
-#ifdef MULTITHREADING
-                if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                result->last_seq = start_counter;
-#endif
-                result->last_pos = &(bucket->cells[0]);
-                prev_found_in_cell_1 = false; // Reinforce prediction
-                // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-                //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
-                return result->last_pos;
-            }
-        }
-        
-        // Cell 0 failed, now check cell 1
-        h1 = *(const uint64_t*)&bucket->cells[1];
-        if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
-            if ((h1 & header_mask) == header_values) {
-                read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
-#ifdef MULTITHREADING
-                if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                result->last_seq = start_counter;
-#endif
-                result->last_pos = &(bucket->cells[1]);
-                prev_found_in_cell_1 = true; // Update prediction
-                // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-                //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
-                return result->last_pos;
-            }
+    }
+    if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
+        if ((h1 & header_mask) == header_values) {
+            read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
+			#ifdef MULTITHREADING
+						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+						result->last_seq = start_counter;
+			#endif
+            result->last_pos = &(bucket->cells[1]);
+            
+            // Track bucket type and cell for successful searches
+            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
+            return result->last_pos;
         }
     }
 
