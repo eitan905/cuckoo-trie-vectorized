@@ -100,10 +100,10 @@ uint64_t accumulate_hash_vectorized(cuckoo_trie* trie, uint64_t x, uint64_t symb
 void accumulate_hash_batch_vectorized(cuckoo_trie* trie, const uint64_t* x_values, const uint64_t* symbols, uint64_t* results, int count) {
 	const __m256i bits_per_symbol = _mm256_set1_epi64x((long long)BITS_PER_SYMBOL);
 	const __m256i fanout_mask = _mm256_set1_epi64x((long long)(FANOUT - 1));
-	const __m256i num_shuffle_blocks = _mm256_set1_epi64x((long long)trie->num_shuffle_blocks);
+	const uint64_t num_shuffle_blocks = trie->num_shuffle_blocks;
 
 	int i = 0;
-	// Process 4 at a time with AVX2
+	// Process 4 at a time with AVX2 (avoiding mullo_epi64 which needs AVX-512)
 	for (; i + 3 < count; i += 4) {
 		__m256i x_vec = _mm256_loadu_si256((__m256i*)&x_values[i]);
 		__m256i sym_vec = _mm256_loadu_si256((__m256i*)&symbols[i]);
@@ -111,16 +111,16 @@ void accumulate_hash_batch_vectorized(cuckoo_trie* trie, const uint64_t* x_value
 		// x ^= symbol
 		x_vec = _mm256_xor_si256(x_vec, sym_vec);
 		
-		// block = x >> BITS_PER_SYMBOL
-		__m256i block_vec = _mm256_srlv_epi64(x_vec, bits_per_symbol);
+		// Extract to scalar for remaining operations (block shift and multiply)
+		uint64_t x_array[4];
+		_mm256_storeu_si256((__m256i*)x_array, x_vec);
 		
-		// depth = x & (FANOUT - 1)
-		__m256i depth_vec = _mm256_and_si256(x_vec, fanout_mask);
-		
-		// result = depth * num_shuffle_blocks + block
-		__m256i result_vec = _mm256_add_epi64(_mm256_mullo_epi64(depth_vec, num_shuffle_blocks), block_vec);
-		
-		_mm256_storeu_si256((__m256i*)&results[i], result_vec);
+		// Compute results in scalar (multiplication is complex in AVX2)
+		for (int j = 0; j < 4; j++) {
+			uint64_t block = x_array[j] >> BITS_PER_SYMBOL;
+			uint64_t depth = x_array[j] & (FANOUT - 1);
+			results[i + j] = depth * num_shuffle_blocks + block;
+		}
 	}
 	
 	// Handle remaining elements with scalar code
