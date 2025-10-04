@@ -30,6 +30,12 @@ static uint64_t find_by_parent_secondary_bucket = 0;
 static uint64_t find_by_parent_primary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for primary buckets
 static uint64_t find_by_parent_secondary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for secondary buckets
 
+// Bucket and cell tracking for find_by_color
+static uint64_t find_by_color_primary_bucket = 0;
+static uint64_t find_by_color_secondary_bucket = 0;
+static uint64_t find_by_color_primary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for primary buckets
+static uint64_t find_by_color_secondary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for secondary buckets
+
 // Bucket occupancy tracking - how many cells pass prefilter per bucket
 static uint64_t bucket_occupancy_counts[5] = {0}; // 0,1,2,3,4 cells occupied per bucket
 
@@ -291,8 +297,17 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 		if ((header & header_mask) == header_values)
 			break;
 	}
-	if (i == CUCKOO_BUCKET_SIZE)
+	if (i == CUCKOO_BUCKET_SIZE) {
+		// Track "not found" statistics
+		if (is_secondary) {
+			find_by_color_secondary_bucket++;
+			find_by_color_secondary_cell_counts[4]++; // not found
+		} else {
+			find_by_color_primary_bucket++;
+			find_by_color_primary_cell_counts[4]++; // not found
+		}
 		return NULL;
+	}
 
 #ifdef MULTITHREADING
 	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
@@ -305,8 +320,8 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-	                   find_by_color_min, find_by_color_max, find_by_color_hist);
+	UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -2421,7 +2436,7 @@ static void print_bucket_cell_stats(const char *prefix) {
     uint64_t total_calls = find_by_parent_primary_bucket + find_by_parent_secondary_bucket;
     if (total_calls == 0) return;
     
-    printf("\n===== %s Bucket/Cell Distribution =====\n", prefix);
+    printf("\n===== %s find_by_parent Bucket/Cell Distribution =====\n", prefix);
     printf("Total find_by_parent calls: %lu\n", total_calls);
     printf("Primary bucket: %lu (%.1f%%)\n", find_by_parent_primary_bucket, 
            100.0 * find_by_parent_primary_bucket / total_calls);
@@ -2479,6 +2494,46 @@ static void print_bucket_cell_stats(const char *prefix) {
     }
 }
 
+static void print_color_bucket_cell_stats(const char *prefix) {
+    uint64_t total_calls = find_by_color_primary_bucket + find_by_color_secondary_bucket;
+    if (total_calls == 0) return;
+    
+    printf("\n===== %s find_by_color Bucket/Cell Distribution =====\n", prefix);
+    printf("Total find_by_color calls: %lu\n", total_calls);
+    printf("Primary bucket: %lu (%.1f%%)\n", find_by_color_primary_bucket, 
+           100.0 * find_by_color_primary_bucket / total_calls);
+    printf("Secondary bucket: %lu (%.1f%%)\n", find_by_color_secondary_bucket,
+           100.0 * find_by_color_secondary_bucket / total_calls);
+    
+    // Primary bucket cell distribution
+    uint64_t total_primary_cells = find_by_color_primary_cell_counts[0] + find_by_color_primary_cell_counts[1] + 
+                                  find_by_color_primary_cell_counts[2] + find_by_color_primary_cell_counts[3] + 
+                                  find_by_color_primary_cell_counts[4];
+    if (total_primary_cells > 0) {
+        printf("Primary bucket cell distribution:\n");
+        for (int i = 0; i < 4; i++) {
+            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_color_primary_cell_counts[i],
+                   100.0 * find_by_color_primary_cell_counts[i] / total_primary_cells);
+        }
+        printf("  Not found: %lu (%.1f%%)\n", find_by_color_primary_cell_counts[4],
+               100.0 * find_by_color_primary_cell_counts[4] / total_primary_cells);
+    }
+    
+    // Secondary bucket cell distribution
+    uint64_t total_secondary_cells = find_by_color_secondary_cell_counts[0] + find_by_color_secondary_cell_counts[1] + 
+                                    find_by_color_secondary_cell_counts[2] + find_by_color_secondary_cell_counts[3] + 
+                                    find_by_color_secondary_cell_counts[4];
+    if (total_secondary_cells > 0) {
+        printf("Secondary bucket cell distribution:\n");
+        for (int i = 0; i < 4; i++) {
+            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_color_secondary_cell_counts[i],
+                   100.0 * find_by_color_secondary_cell_counts[i] / total_secondary_cells);
+        }
+        printf("  Not found: %lu (%.1f%%)\n", find_by_color_secondary_cell_counts[4],
+               100.0 * find_by_color_secondary_cell_counts[4] / total_secondary_cells);
+    }
+}
+
 void ct_print_timing_stats(void) {
     if (find_by_color_call_count > 0) {
         print_histogram_section(
@@ -2489,6 +2544,7 @@ void ct_print_timing_stats(void) {
             find_by_color_max,
             find_by_color_hist
         );
+		print_color_bucket_cell_stats("Scalar");
     }
     if (find_by_parent_call_count > 0) {
         print_histogram_section(
@@ -2499,8 +2555,8 @@ void ct_print_timing_stats(void) {
             find_by_parent_max,
             find_by_parent_hist
         );
+		print_bucket_cell_stats("Scalar");
     }
-    print_bucket_cell_stats("Scalar");
 }
 
 void ct_free(cuckoo_trie* trie) {
