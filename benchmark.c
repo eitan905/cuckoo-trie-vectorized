@@ -189,6 +189,8 @@ void bench_insert(char* dataset_name, uint64_t trie_size) {
 	timer_report(&timer, dataset.num_keys);
 	if (duplicates > 0)
 		printf("Note: %lu / %lu keys were duplicates\n", duplicates, dataset.num_keys);
+	
+	ct_print_timing_stats();
 }
 
 uint8_t* sample_keys(ct_kv** kv_pointers, uint64_t num_kvs, uint64_t sample_size) {
@@ -259,7 +261,7 @@ void bench_pos_lookup(dataset_t* dataset, uint64_t trie_size) {
 	timer_report(&timer, num_lookups);
 	notify_critical_section_end();
 	
-	ct_free(trie);
+	ct_print_timing_stats();
 }
 
 typedef struct {
@@ -361,6 +363,8 @@ void bench_mt_pos_lookup(char* dataset_name, uint64_t trie_size, int num_threads
 	run_multiple_threads(lookup_thread, num_threads, thread_contexts, sizeof(lookup_thread_ctx));
 	timer_report_mt(&timer, lookups_per_thread * num_threads, num_threads);
 	notify_critical_section_end();
+	
+	ct_print_timing_stats();
 }
 
 void bench_mw_insert_pos_lookup(char* dataset_name, uint64_t trie_size, int num_insert_threads, int num_lookup_threads) {
@@ -480,6 +484,8 @@ void bench_mw_insert_pos_lookup(char* dataset_name, uint64_t trie_size, int num_
 		((float)total_lookups) / time_took / 1.0e6,
 		((float)lookups_per_thread) / time_took / 1.0e6,
 		time_took / ((float)lookups_per_thread) * 1.0e9);
+	
+	ct_print_timing_stats();
 }
 
 void bench_mw_insert(char* dataset_name, uint64_t trie_size, int num_threads) {
@@ -516,6 +522,8 @@ void bench_mw_insert(char* dataset_name, uint64_t trie_size, int num_threads) {
 	run_multiple_threads(insert_thread, num_threads, thread_contexts, sizeof(insert_thread_ctx));
 	timer_report_mt(&timer, dataset.num_keys, num_threads);
 	notify_critical_section_end();
+	
+	ct_print_timing_stats();
 }
 
 void range_read_from_key(cuckoo_trie* trie, uint64_t num_ranges, uint64_t range_size,
@@ -615,7 +623,8 @@ void bench_range_from_key(char* dataset_name, uint64_t trie_size, range_func_t r
 	timer_start(&timer);
 	range_func(trie, num_ranges, range_size, &dataset);
 	timer_report(&timer, num_ranges);
-
+	
+	ct_print_timing_stats();
 }
 
 float load_factor(cuckoo_trie* trie) {
@@ -1127,6 +1136,8 @@ void bench_ycsb(char* dataset_name, uint64_t trie_size, const ycsb_workload_spec
 	timer_start(&timer);
 	run_multiple_threads(ycsb_thread, num_threads, thread_contexts, sizeof(ycsb_thread_ctx));
 	timer_report_mt(&timer, spec.num_ops * num_threads, num_threads);
+	
+	ct_print_timing_stats();
 }
 
 int main(int argc, char** argv) {
