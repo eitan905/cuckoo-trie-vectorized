@@ -1,226 +1,279 @@
+// race_test.c
+// Detects mixed-snapshot races in a multithreaded Cuckoo Trie lookup path.
+
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <stdbool.h>
 #include <string.h>
 #include <pthread.h>
 #include <unistd.h>
+#include <inttypes.h>   // <-- for PRIu64
 
 #include "cuckoo_trie.h"
 #include "random.h"
 #include "dataset.h"
 
-#define NUM_KEYS 1000
-#define NUM_THREADS 16
-#define TEST_DURATION_SEC 30
+// ---------- Tunables ----------
+#ifndef NUM_THREADS
+#define NUM_THREADS 32          // 2 writers + (NUM_THREADS-2) readers
+#endif
+
+#ifndef TEST_DURATION_SEC
+#define TEST_DURATION_SEC 60
+#endif
+
+#ifndef NUM_KEYS
+#define NUM_KEYS 2              // concentrate contention
+#endif
+
+#ifndef MAX_KEY_SIZE
 #define MAX_KEY_SIZE 16
-#define DEFAULT_VALUE_SIZE 8
+#endif
+
+#ifndef DEFAULT_VALUE_SIZE
+#define DEFAULT_VALUE_SIZE 8    // 7-byte key signature + 1-byte flip
+#endif
+// -----------------------------
 
 typedef struct {
     cuckoo_trie* trie;
-    uint8_t* kvs_buf;
-    uint64_t buf_size;
-    int num_keys;
-    volatile int* stop_flag;
-    volatile long* lookup_count;
-    volatile long* error_count;
-    int thread_id;
+    uint8_t*     kvs_buf;
+    uint64_t     buf_size;
+    int          num_keys;
+    volatile int*   stop_flag;
+    volatile long*  lookup_count;
+    volatile long*  error_count;
+    int          thread_id;
 } thread_ctx_t;
 
-// Generate unique key-value pairs using the same pattern as test.c
-void gen_test_kvs(uint8_t* buf, uint64_t num_kvs, uint64_t max_key_len) {
-    uint64_t i;
-    uint8_t* buf_pos;
+// Map an index to its KV pointer inside the linear buffer
+static inline ct_kv* kv_at(uint8_t* base, int idx) {
+    uint8_t* p = base;
+    for (int i = 0; i < idx; i++) {
+        ct_kv* kv = (ct_kv*)p;
+        p += kv_size(kv);
+    }
+    return (ct_kv*)p;
+}
 
-    buf_pos = buf;
-    i = 0;
-    while (i < num_kvs) {
-        ct_kv* kv = (ct_kv*) buf_pos;
-        uint64_t len = 8; // Fixed length for simplicity
-        kv_init(kv, len, DEFAULT_VALUE_SIZE);
-        
-        // Make unique keys by using the index
-        memset(kv_key_bytes(kv), 0, len);
-        *(uint64_t*)kv_key_bytes(kv) = i; // Use full 64-bit unique value
-        
-        memset(kv_value_bytes(kv), 0xAB, DEFAULT_VALUE_SIZE);
-        
-        buf_pos += kv_size(kv);
-        i++;
+// 7-byte signature derived from the key’s 64-bit ID (low 56 bits, LE)
+static inline void make_key_sig(uint64_t key_id, uint8_t sig7[7]) {
+    memcpy(sig7, &key_id, 7);
+}
+
+// Generate deterministic, self-validating key-value pairs
+void gen_test_kvs(uint8_t* buf, uint64_t num_kvs, uint64_t max_key_len) {
+    (void)max_key_len; // we always use 8 here
+    uint8_t* p = buf;
+    for (uint64_t i = 0; i < num_kvs; i++) {
+        ct_kv* kv = (ct_kv*)p;
+        uint64_t klen = 8; // fixed 8-byte key (stores i)
+        kv_init(kv, klen, DEFAULT_VALUE_SIZE);
+
+        // key bytes = 64-bit i (little-endian)
+        memset(kv_key_bytes(kv), 0, klen);
+        *(uint64_t*)kv_key_bytes(kv) = i;
+
+        // value[0..6] = signature(key), value[7] = flip (starts at 0)
+        make_key_sig(i, kv_value_bytes(kv));
+        kv_value_bytes(kv)[7] = 0;
+
+        p += kv_size(kv);
     }
 }
 
-// Writer thread - continuously modifies existing entries
+// Writer thread: flip only the last value byte; keep signature constant
 void* writer_thread(void* arg) {
     thread_ctx_t* ctx = (thread_ctx_t*)arg;
-    uint8_t* buf_pos = ctx->kvs_buf;
     int key_idx = 0;
-    
+
     while (!*(ctx->stop_flag)) {
-        // Find the key to modify
-        buf_pos = ctx->kvs_buf;
-        for (int i = 0; i < key_idx; i++) {
-            ct_kv* kv = (ct_kv*)buf_pos;
-            buf_pos += kv_size(kv);
+        ct_kv* kv = kv_at(ctx->kvs_buf, key_idx);
+
+        // Flip the last byte to ensure frequent updates without changing signature
+        uint8_t* val = kv_value_bytes(kv);
+        val[7] ^= 0xFF;
+
+        int created_new = 0;
+        int rc = ct_upsert(ctx->trie, kv, &created_new);
+        if (rc != S_OK) {
+            fprintf(stderr, "Writer error: rc=%d on key_idx=%d\n", rc, key_idx);
         }
-        
-        ct_kv* kv = (ct_kv*)buf_pos;
-        
-        // Modify the value (keep key same)
-        uint8_t new_value = (uint8_t)(rand_uint64() & 0xFF);
-        memset(kv_value_bytes(kv), new_value, DEFAULT_VALUE_SIZE);
-        
-        // Update in trie
-        int created_new;
-        int result = ct_upsert(ctx->trie, kv, &created_new);
-        if (result != S_OK) {
-            printf("Writer error: %d\n", result);
-        }
-        
+
         key_idx = (key_idx + 1) % ctx->num_keys;
-        usleep(1000); // 1ms delay
     }
+
     return NULL;
 }
 
-// Reader thread - continuously looks up keys
+// Reader thread: validate both key bytes and 7-byte signature on non-NULL results
 void* reader_thread(void* arg) {
     thread_ctx_t* ctx = (thread_ctx_t*)arg;
-    long lookups = 0;
-    long errors = 0;
-    
+    long local_lookups = 0;
+    long local_errors  = 0;
+
     while (!*(ctx->stop_flag)) {
-        // Pick a random key to lookup
-        int key_idx = rand_uint64() % ctx->num_keys;
-        
-        // Find the key in buffer
-        uint8_t* buf_pos = ctx->kvs_buf;
-        for (int i = 0; i < key_idx; i++) {
-            ct_kv* kv = (ct_kv*)buf_pos;
-            buf_pos += kv_size(kv);
+        int key_idx = (int)(rand_uint64() % (uint64_t)ctx->num_keys);
+
+        ct_kv* expected = kv_at(ctx->kvs_buf, key_idx);
+        const int exp_klen = kv_key_size(expected);
+        uint8_t* exp_kbytes = kv_key_bytes(expected);  // non-const to satisfy ct_lookup signature
+
+        // Precompute expected signature from key ID
+        uint8_t expected_sig[7];
+        uint64_t key_id = *(const uint64_t*)exp_kbytes;
+        make_key_sig(key_id, expected_sig);
+
+        // ct_lookup expects uint8_t*, not const void*
+        ct_kv* found = ct_lookup(ctx->trie, exp_klen, exp_kbytes);
+        local_lookups++;
+
+        if (!found) {
+            local_errors++;
+        } else {
+            // Validate key bytes (guards against wrong-entry return)
+            int f_klen = kv_key_size(found);
+            uint8_t* f_kbytes = kv_key_bytes(found);
+            bool key_ok = (f_klen == exp_klen) &&
+                          (memcmp(f_kbytes, exp_kbytes, exp_klen) == 0);
+
+            // Validate 7-byte signature (guards against mixed-snapshot payload)
+            const uint8_t* f_val = kv_value_bytes(found);
+            bool sig_ok = (memcmp(f_val, expected_sig, 7) == 0);
+
+            if (!(key_ok && sig_ok)) {
+                local_errors++;
+                // Optional debug:
+                // fprintf(stderr, "T%d: mismatch key_idx=%d key_ok=%d sig_ok=%d\n",
+                //         ctx->thread_id, key_idx, (int)key_ok, (int)sig_ok);
+            }
         }
-        
-        ct_kv* expected_kv = (ct_kv*)buf_pos;
-        
-        // Perform lookup
-        ct_kv* found_kv = ct_lookup(ctx->trie, kv_key_size(expected_kv), kv_key_bytes(expected_kv));
-        
-        lookups++;
-        
-        if (found_kv == NULL) {
-            errors++;
-            printf("Thread %d: Key %d not found (lookup %ld)\n", ctx->thread_id, key_idx, lookups);
-        }
-        
-        // Tight loop to maximize race probability
-        if (lookups % 100000 == 0) {
+
+        if ((local_lookups & 0x1FFFF) == 0) {
             usleep(100);
         }
     }
-    
-    __sync_fetch_and_add(ctx->lookup_count, lookups);
-    __sync_fetch_and_add(ctx->error_count, errors);
+
+    __sync_fetch_and_add(ctx->lookup_count, local_lookups);
+    __sync_fetch_and_add(ctx->error_count,  local_errors);
     return NULL;
 }
 
-int main() {
-    printf("Starting race condition stress test...\n");
-    printf("Duration: %d seconds\n", TEST_DURATION_SEC);
-    printf("Threads: %d readers + 2 writers\n", NUM_THREADS - 2);
-    
-    // Initialize random number generator
+int main(void) {
+    printf("Starting Cuckoo Trie race-condition stress test\n");
+    printf("Config: duration=%ds, threads=%d (readers=%d, writers=2), keys=%d\n",
+           TEST_DURATION_SEC, NUM_THREADS, NUM_THREADS - 2, NUM_KEYS);
+
+    // RNG init
     seed_and_print();
-    
-    // Allocate trie
+
+    // Allocate trie with extra capacity
     cuckoo_trie* trie = ct_alloc(NUM_KEYS * 3);
-    if (trie == NULL) {
-        printf("Failed to allocate trie\n");
+    if (!trie) {
+        fprintf(stderr, "Failed to allocate trie\n");
         return 1;
     }
-    
-    // Create key buffer
-    uint64_t buf_size = NUM_KEYS * kv_required_size(MAX_KEY_SIZE, DEFAULT_VALUE_SIZE);
-    uint8_t* kvs_buf = malloc(buf_size);
-    if (kvs_buf == NULL) {
-        printf("Failed to allocate key buffer\n");
+
+    // Allocate a buffer big enough for NUM_KEYS entries (worst-case per-key size)
+    uint64_t one_kv_size = kv_required_size(MAX_KEY_SIZE, DEFAULT_VALUE_SIZE);
+    uint64_t buf_size = (uint64_t)NUM_KEYS * one_kv_size;
+    uint8_t* kvs_buf = (uint8_t*)malloc(buf_size);
+    if (!kvs_buf) {
+        fprintf(stderr, "Failed to allocate key buffer (%" PRIu64 " bytes)\n", buf_size);
+        ct_free(trie);
         return 1;
     }
-    
-    // Generate keys
+
+    // Initialize KVs (8-byte keys, 8-byte values with signature+flip)
     gen_test_kvs(kvs_buf, NUM_KEYS, MAX_KEY_SIZE);
-    
+
     // Insert all keys initially
-    uint8_t* buf_pos = kvs_buf;
+    uint8_t* p = kvs_buf;
     for (int i = 0; i < NUM_KEYS; i++) {
-        ct_kv* kv = (ct_kv*)buf_pos;
-        int result = ct_insert(trie, kv);
-        if (result != S_OK) {
-            printf("Initial insert failed: %d\n", result);
+        ct_kv* kv = (ct_kv*)p;
+        int rc = ct_insert(trie, kv);
+        if (rc != S_OK) {
+            fprintf(stderr, "Initial insert failed for key %d: rc=%d\n", i, rc);
+            free(kvs_buf);
+            ct_free(trie);
             return 1;
         }
-        buf_pos += kv_size(kv);
+        p += kv_size(kv);
     }
-    
     printf("Inserted %d keys successfully\n", NUM_KEYS);
-    
+
     // Shared state
-    volatile int stop_flag = 0;
+    volatile int  stop_flag = 0;
     volatile long total_lookups = 0;
-    volatile long total_errors = 0;
-    
+    volatile long total_errors  = 0;
+
     // Create threads
-    pthread_t threads[NUM_THREADS];
-    thread_ctx_t contexts[NUM_THREADS];
-    
+    pthread_t    threads[NUM_THREADS];
+    thread_ctx_t ctxs[NUM_THREADS];
+
     for (int i = 0; i < NUM_THREADS; i++) {
-        contexts[i].trie = trie;
-        contexts[i].kvs_buf = kvs_buf;
-        contexts[i].buf_size = buf_size;
-        contexts[i].num_keys = NUM_KEYS;
-        contexts[i].stop_flag = &stop_flag;
-        contexts[i].lookup_count = &total_lookups;
-        contexts[i].error_count = &total_errors;
-        contexts[i].thread_id = i;
-        
+        ctxs[i].trie         = trie;
+        ctxs[i].kvs_buf      = kvs_buf;
+        ctxs[i].buf_size     = buf_size;
+        ctxs[i].num_keys     = NUM_KEYS;
+        ctxs[i].stop_flag    = &stop_flag;
+        ctxs[i].lookup_count = &total_lookups;
+        ctxs[i].error_count  = &total_errors;
+        ctxs[i].thread_id    = i;
+
         if (i < 2) {
-            // First 2 threads are writers
-            pthread_create(&threads[i], NULL, writer_thread, &contexts[i]);
+            if (pthread_create(&threads[i], NULL, writer_thread, &ctxs[i]) != 0) {
+                fprintf(stderr, "Failed to create writer thread %d\n", i);
+                stop_flag = 1;
+                for (int j = 0; j < i; j++) pthread_join(threads[j], NULL);
+                free(kvs_buf);
+                ct_free(trie);
+                return 1;
+            }
         } else {
-            // Rest are readers
-            pthread_create(&threads[i], NULL, reader_thread, &contexts[i]);
+            if (pthread_create(&threads[i], NULL, reader_thread, &ctxs[i]) != 0) {
+                fprintf(stderr, "Failed to create reader thread %d\n", i);
+                stop_flag = 1;
+                for (int j = 0; j < i; j++) pthread_join(threads[j], NULL);
+                free(kvs_buf);
+                ct_free(trie);
+                return 1;
+            }
         }
     }
-    
+
     // Run test
     printf("Test running...\n");
     sleep(TEST_DURATION_SEC);
-    
-    // Stop all threads
+
+    // Signal stop and join
     stop_flag = 1;
-    
-    // Wait for completion
     for (int i = 0; i < NUM_THREADS; i++) {
         pthread_join(threads[i], NULL);
     }
-    
-    // Report results
+
+    // Report
     long lookups = total_lookups;
-    long errors = total_errors;
-    
+    long errors  = total_errors;
+
     printf("\n=== RESULTS ===\n");
     printf("Total lookups: %ld\n", lookups);
-    printf("Total errors: %ld\n", errors);
+    printf("Total errors : %ld\n", errors);
     if (lookups > 0) {
-        printf("Error rate: %.6f%%\n", errors * 100.0 / lookups);
+        double rate = (errors * 100.0) / (double)lookups;
+        printf("Error rate   : %.9f%%\n", rate);
     }
-    
+
     // Cleanup
     ct_free(trie);
     free(kvs_buf);
-    
+
     if (errors > 0) {
-        printf("*** RACE CONDITION DETECTED ***\n");
+        printf("\n*** INCOHERENT SNAPSHOT DETECTED (NULL or wrong entry/value) ***\n");
         return 1;
     } else {
-        printf("No race conditions detected in this run\n");
+        printf("\nNo incoherent snapshots detected in this run\n");
         return 0;
     }
 }

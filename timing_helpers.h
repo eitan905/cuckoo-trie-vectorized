@@ -13,8 +13,8 @@
         count++; \
         if (cycles < min) min = cycles; \
         if (cycles > max) max = cycles; \
-        int bin = (cycles < 50) ? 0 : ((cycles >= 5000) ? 12 : (cycles - 50) / 50); \
-        hist[bin]++; \
+        int bin = (cycles < 50) ? 0 : (cycles < 550) ? 1 + (int)((cycles - 50) / 50) : (cycles >= 5000) ? 12 : -1; \
+        if (bin >= 0) hist[bin]++; \
     } while(0)
 
     #define UPDATE_FIND_BY_PARENT_STATS(start_cycles, total, count, min, max, hist, is_secondary, cell_idx) do { \
@@ -23,8 +23,8 @@
         count++; \
         if (cycles < min) min = cycles; \
         if (cycles > max) max = cycles; \
-        int bin = (cycles < 50) ? 0 : ((cycles >= 5000) ? 12 : (cycles - 50) / 50); \
-        hist[bin]++; \
+        int bin = (cycles < 50) ? 0 : (cycles < 550) ? 1 + (int)((cycles - 50) / 50) : (cycles >= 5000) ? 12 : -1; \
+        if (bin >= 0) hist[bin]++; \
         if (is_secondary) { \
             find_by_parent_secondary_bucket++; \
             find_by_parent_secondary_cell_counts[cell_idx]++; \
