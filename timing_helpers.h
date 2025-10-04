@@ -25,9 +25,13 @@
         if (cycles > max) max = cycles; \
         int bin = (cycles < 50) ? 0 : ((cycles >= 5000) ? 12 : (cycles - 50) / 50); \
         hist[bin]++; \
-        if (is_secondary) find_by_parent_secondary_bucket++; \
-        else find_by_parent_primary_bucket++; \
-        find_by_parent_cell_counts[cell_idx]++; \
+        if (is_secondary) { \
+            find_by_parent_secondary_bucket++; \
+            find_by_parent_secondary_cell_counts[cell_idx]++; \
+        } else { \
+            find_by_parent_primary_bucket++; \
+            find_by_parent_primary_cell_counts[cell_idx]++; \
+        } \
     } while(0)
 #else
     #define UPDATE_TIMING_STATS(start_cycles, total, count, min, max, hist) do { } while(0)

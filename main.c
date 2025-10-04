@@ -27,7 +27,25 @@ static uint64_t find_by_parent_min = UINT64_MAX, find_by_parent_max = 0;
 // Bucket and cell tracking for find_by_parent
 static uint64_t find_by_parent_primary_bucket = 0;
 static uint64_t find_by_parent_secondary_bucket = 0;
-static uint64_t find_by_parent_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found"
+static uint64_t find_by_parent_primary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for primary buckets
+static uint64_t find_by_parent_secondary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for secondary buckets
+
+// Bucket occupancy tracking - how many cells pass prefilter per bucket
+static uint64_t bucket_occupancy_counts[5] = {0}; // 0,1,2,3,4 cells occupied per bucket
+
+// Switch case distribution for branch prediction analysis
+static uint64_t switch_case_counts[5] = {0}; // cases 0,1,2,3,4 from popcount
+
+static inline int count_occupied_cells(ct_bucket* bucket, uint64_t tag_mask64, uint64_t tag_value64) {
+    int count = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t h = *(const uint64_t*)&bucket->cells[i];
+        if (((uint8_t)h & TYPE_MASK) && ((h & tag_mask64) == tag_value64)) {
+            count++;
+        }
+    }
+    return count;
+}
 
 static inline uint64_t rdtsc_timing() {
     uint32_t lo, hi;
@@ -243,7 +261,7 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
-	// uint64_t start_cycles = rdtsc_start();
+	uint64_t start_cycles = rdtsc_start();
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -287,8 +305,8 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-	//                    find_by_color_min, find_by_color_max, find_by_color_hist);
+	UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+	                   find_by_color_min, find_by_color_max, find_by_color_hist);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -298,7 +316,7 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 												 ct_entry_local_copy* result, uint64_t is_secondary,
 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	// uint64_t start_cycles = rdtsc_start();
+	uint64_t start_cycles = rdtsc_start();
 	int i;
 
 	uint64_t header_mask = 0;
@@ -317,6 +335,16 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
 	if (is_secondary)
 		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
+
+	// Track bucket occupancy and switch case distribution
+	const size_t OFF_CAT = offsetof(ct_entry, color_and_tag);
+	const uint64_t tag_low_mask = ((1ULL << TAG_BITS) - 1);
+	const uint64_t tag_mask64   = tag_low_mask << (8 * OFF_CAT);
+	const uint64_t tag_value64  = (tag & tag_low_mask) << (8 * OFF_CAT);
+	
+	int occupied_cells = count_occupied_cells(bucket, tag_mask64, tag_value64);
+	bucket_occupancy_counts[occupied_cells]++;
+	switch_case_counts[occupied_cells]++;
 
 #ifdef MULTITHREADING
 	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
@@ -338,12 +366,16 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	if (i == CUCKOO_BUCKET_SIZE) {
 		// Track bucket type for failed searches
-		// if (is_secondary) {
-		// 	find_by_parent_secondary_bucket++;
-		// } else {
-		// 	find_by_parent_primary_bucket++;
-		// }
-		// find_by_parent_cell_counts[4]++; // not found
+		if (is_secondary) {
+			find_by_parent_secondary_bucket++;
+		} else {
+			find_by_parent_primary_bucket++;
+		}
+		if (is_secondary) {
+			find_by_parent_secondary_cell_counts[4]++; // not found
+		} else {
+			find_by_parent_primary_cell_counts[4]++; // not found
+		}
 		return NULL;
 	}
 
@@ -358,16 +390,8 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// Track bucket type and cell for successful searches
-	// if (is_secondary) {
-	// 	find_by_parent_secondary_bucket++;
-	// } else {
-	// 	find_by_parent_primary_bucket++;
-	// }
-	// find_by_parent_cell_counts[i]++; // cell 0,1,2,3
-	
-	// UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-	//                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+	UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+	                           find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -2404,17 +2428,54 @@ static void print_bucket_cell_stats(const char *prefix) {
     printf("Secondary bucket: %lu (%.1f%%)\n", find_by_parent_secondary_bucket,
            100.0 * find_by_parent_secondary_bucket / total_calls);
     
-    uint64_t total_cells = find_by_parent_cell_counts[0] + find_by_parent_cell_counts[1] + 
-                          find_by_parent_cell_counts[2] + find_by_parent_cell_counts[3] + 
-                          find_by_parent_cell_counts[4];
-    if (total_cells > 0) {
-        printf("Cell distribution:\n");
+    // Primary bucket cell distribution
+    uint64_t total_primary_cells = find_by_parent_primary_cell_counts[0] + find_by_parent_primary_cell_counts[1] + 
+                                  find_by_parent_primary_cell_counts[2] + find_by_parent_primary_cell_counts[3] + 
+                                  find_by_parent_primary_cell_counts[4];
+    if (total_primary_cells > 0) {
+        printf("Primary bucket cell distribution:\n");
         for (int i = 0; i < 4; i++) {
-            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_cell_counts[i],
-                   100.0 * find_by_parent_cell_counts[i] / total_cells);
+            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_primary_cell_counts[i],
+                   100.0 * find_by_parent_primary_cell_counts[i] / total_primary_cells);
         }
-        printf("  Not found: %lu (%.1f%%)\n", find_by_parent_cell_counts[4],
-               100.0 * find_by_parent_cell_counts[4] / total_cells);
+        printf("  Not found: %lu (%.1f%%)\n", find_by_parent_primary_cell_counts[4],
+               100.0 * find_by_parent_primary_cell_counts[4] / total_primary_cells);
+    }
+    
+    // Secondary bucket cell distribution
+    uint64_t total_secondary_cells = find_by_parent_secondary_cell_counts[0] + find_by_parent_secondary_cell_counts[1] + 
+                                    find_by_parent_secondary_cell_counts[2] + find_by_parent_secondary_cell_counts[3] + 
+                                    find_by_parent_secondary_cell_counts[4];
+    if (total_secondary_cells > 0) {
+        printf("Secondary bucket cell distribution:\n");
+        for (int i = 0; i < 4; i++) {
+            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_secondary_cell_counts[i],
+                   100.0 * find_by_parent_secondary_cell_counts[i] / total_secondary_cells);
+        }
+        printf("  Not found: %lu (%.1f%%)\n", find_by_parent_secondary_cell_counts[4],
+               100.0 * find_by_parent_secondary_cell_counts[4] / total_secondary_cells);
+    }
+    
+    // Bucket occupancy distribution
+    uint64_t total_buckets = bucket_occupancy_counts[0] + bucket_occupancy_counts[1] + 
+                            bucket_occupancy_counts[2] + bucket_occupancy_counts[3] + bucket_occupancy_counts[4];
+    if (total_buckets > 0) {
+        printf("Bucket occupancy distribution (cells passing prefilter):\n");
+        for (int i = 0; i < 5; i++) {
+            printf("  %d cells: %lu (%.1f%%)\n", i, bucket_occupancy_counts[i],
+                   100.0 * bucket_occupancy_counts[i] / total_buckets);
+        }
+    }
+    
+    // Switch case distribution for branch prediction analysis
+    uint64_t total_switches = switch_case_counts[0] + switch_case_counts[1] + 
+                             switch_case_counts[2] + switch_case_counts[3] + switch_case_counts[4];
+    if (total_switches > 0) {
+        printf("Switch case distribution (branch prediction analysis):\n");
+        for (int i = 0; i < 5; i++) {
+            printf("  Case %d: %lu (%.1f%%)\n", i, switch_case_counts[i],
+                   100.0 * switch_case_counts[i] / total_switches);
+        }
     }
 }
 
