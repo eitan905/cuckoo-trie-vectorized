@@ -8,12 +8,23 @@ BENCHMARK_SOURCES=benchmark.c random.c dataset.c util.c random_dist.c
 BENCHMARK_DEPS=${BENCHMARK_SOURCES} random.h cuckoo_trie.h dataset.h cuckoo_trie_internal.h util.h
 BINARIES=libcuckoo_trie.so libcuckoo_trie_debug.so libcuckoo_trie_vectorized.so test test_debug benchmark benchmark_vectorized race_test race_test_vectorized
 
+# Statistics collection control: make STATS=0 (disable) or make STATS=1 (enable)
+ifdef STATS
+ifeq ($(STATS),0)
+STATS_FLAGS=-UDCOLLECT_STATISTICS
+else
+STATS_FLAGS=-DCOLLECT_STATISTICS
+endif
+else
+STATS_FLAGS=-DCOLLECT_STATISTICS  # Default: enabled
+endif
+
 # Without -fvisibility=hidden gcc assumes that all functions are exported and usually
 # won't inline them
 OPTIMIZE_FLAGS=-O3 -fvisibility=hidden -flto -fno-strict-aliasing
 
 # Add -march=haswell to enable the bextr_u32 builtin and AVX2 instructions
-FLAGS=-march=haswell -mavx2 -Wreturn-type -Wuninitialized -Wunused-parameter
+FLAGS=-march=haswell -mavx2 -Wreturn-type -Wuninitialized -Wunused-parameter $(STATS_FLAGS)
 
 CC ?= gcc
 

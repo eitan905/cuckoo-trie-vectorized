@@ -11,9 +11,6 @@
 #include "util.h"
 #include "timing_helpers.h"
 
-// Control statistics collection (comment out for maximum performance)
-#define COLLECT_STATISTICS
-
 #ifdef COLLECT_STATISTICS
 // Global timing variables for scalar version
 static uint64_t find_by_color_total_cycles = 0;
@@ -306,6 +303,7 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 	}
 	if (i == CUCKOO_BUCKET_SIZE) {
 		// Track "not found" statistics
+#ifdef COLLECT_STATISTICS
 		if (is_secondary) {
 			find_by_color_secondary_bucket++;
 			find_by_color_secondary_cell_counts[4]++; // not found
@@ -313,6 +311,7 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 			find_by_color_primary_bucket++;
 			find_by_color_primary_cell_counts[4]++; // not found
 		}
+#endif
 		return NULL;
 	}
 
@@ -394,6 +393,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	if (i == CUCKOO_BUCKET_SIZE) {
 		// Track bucket type for failed searches
+#ifdef COLLECT_STATISTICS
 		if (is_secondary) {
 			find_by_parent_secondary_bucket++;
 		} else {
@@ -404,6 +404,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 		} else {
 			find_by_parent_primary_cell_counts[4]++; // not found
 		}
+#endif
 		return NULL;
 	}
 
@@ -2447,6 +2448,7 @@ static void print_histogram_section(
     
 }
 
+#ifdef COLLECT_STATISTICS
 static void print_bucket_cell_stats(const char *prefix) {
     uint64_t total_calls = find_by_parent_primary_bucket + find_by_parent_secondary_bucket;
     if (total_calls == 0) return;
@@ -2548,6 +2550,7 @@ static void print_color_bucket_cell_stats(const char *prefix) {
                100.0 * find_by_color_secondary_cell_counts[4] / total_secondary_cells);
     }
 }
+#endif
 
 void ct_print_timing_stats(void) {
 #ifdef COLLECT_STATISTICS

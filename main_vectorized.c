@@ -13,9 +13,6 @@
 #include "util.h"
 #include "timing_helpers.h"
 
-// Control statistics collection (comment out for maximum performance)
-#define COLLECT_STATISTICS
-
 // Compile-time constants to avoid runtime calculations
 #define TAG_MASK_VALUE ((1ULL << TAG_BITS) - 1)
 #define PARENT_COLOR_MASK_VALUE ((0xFFULL << PARENT_COLOR_SHIFT) & 0xFF)
@@ -366,6 +363,7 @@ static void print_histogram_section(
 //     }
 // }
 
+#ifdef COLLECT_STATISTICS
 static void print_bucket_cell_stats(const char *prefix) {
     uint64_t total_calls = find_by_parent_primary_bucket + find_by_parent_secondary_bucket;
     if (total_calls == 0) return;
@@ -427,6 +425,7 @@ static void print_bucket_cell_stats(const char *prefix) {
         }
     }
 }
+#endif
 
 void ct_print_timing_stats(void) {
 #ifdef COLLECT_STATISTICS
@@ -538,11 +537,15 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
     if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
         if ((h1 & header_mask) == header_values) {
+#ifdef COLLECT_STATISTICS
             prefilter_pass_count++;  // Prefilter passed
+#endif
             read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
 			#ifdef MULTITHREADING
 						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+#ifdef COLLECT_STATISTICS
                             stale_data_caught_count++;  // Stale data detected
+#endif
                             return NULL;
                         }
 						result->last_seq = start_counter;
@@ -562,11 +565,15 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
     if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) {
         if ((h2 & header_mask) == header_values) {
+#ifdef COLLECT_STATISTICS
             prefilter_pass_count++;  // Prefilter passed
+#endif
             read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
 			#ifdef MULTITHREADING
 						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+#ifdef COLLECT_STATISTICS
                             stale_data_caught_count++;  // Stale data detected
+#endif
                             return NULL;
                         }
 						result->last_seq = start_counter;
@@ -584,11 +591,15 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 	uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
     if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) {
         if ((h3 & header_mask) == header_values) {
+#ifdef COLLECT_STATISTICS
             prefilter_pass_count++;  // Prefilter passed
+#endif
             read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
 			#ifdef MULTITHREADING
 				if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+#ifdef COLLECT_STATISTICS
                     stale_data_caught_count++;  // Stale data detected
+#endif
                     return NULL;
                 }
 				result->last_seq = start_counter;
@@ -671,6 +682,7 @@ ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
 
 	if (i == CUCKOO_BUCKET_SIZE) {
 		// Track bucket type for failed searches
+#ifdef COLLECT_STATISTICS
 		if (is_secondary) {
 			find_by_parent_secondary_bucket++;
 			find_by_parent_secondary_cell_counts[4]++; // not found
@@ -678,6 +690,7 @@ ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
 			find_by_parent_primary_bucket++;
 			find_by_parent_primary_cell_counts[4]++; // not found
 		}
+#endif
 		return NULL;
 	}
 
