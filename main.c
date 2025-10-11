@@ -11,6 +11,10 @@
 #include "util.h"
 #include "timing_helpers.h"
 
+// Control statistics collection (comment out for maximum performance)
+#define COLLECT_STATISTICS
+
+#ifdef COLLECT_STATISTICS
 // Global timing variables for scalar version
 static uint64_t find_by_color_total_cycles = 0;
 static uint64_t find_by_color_call_count = 0;
@@ -41,6 +45,7 @@ static uint64_t bucket_occupancy_counts[5] = {0}; // 0,1,2,3,4 cells occupied pe
 
 // Switch case distribution for branch prediction analysis
 static uint64_t switch_case_counts[5] = {0}; // cases 0,1,2,3,4 from popcount
+#endif
 
 static inline int count_occupied_cells(ct_bucket* bucket, uint64_t tag_mask64, uint64_t tag_value64) {
     int count = 0;
@@ -267,7 +272,9 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
+#ifdef COLLECT_STATISTICS
 	uint64_t start_cycles = rdtsc_start();
+#endif
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -320,8 +327,10 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
+#ifdef COLLECT_STATISTICS
 	UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
 	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
+#endif
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -331,7 +340,9 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 												 ct_entry_local_copy* result, uint64_t is_secondary,
 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+#ifdef COLLECT_STATISTICS
 	uint64_t start_cycles = rdtsc_start();
+#endif
 	int i;
 
 	uint64_t header_mask = 0;
@@ -357,9 +368,11 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 	const uint64_t tag_mask64   = tag_low_mask << (8 * OFF_CAT);
 	const uint64_t tag_value64  = (tag & tag_low_mask) << (8 * OFF_CAT);
 	
+#ifdef COLLECT_STATISTICS
 	int occupied_cells = count_occupied_cells(bucket, tag_mask64, tag_value64);
 	bucket_occupancy_counts[occupied_cells]++;
 	switch_case_counts[occupied_cells]++;
+#endif
 
 #ifdef MULTITHREADING
 	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
@@ -405,8 +418,10 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
+#ifdef COLLECT_STATISTICS
 	UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
 	                           find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+#endif
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -2535,6 +2550,7 @@ static void print_color_bucket_cell_stats(const char *prefix) {
 }
 
 void ct_print_timing_stats(void) {
+#ifdef COLLECT_STATISTICS
     if (find_by_color_call_count > 0) {
         print_histogram_section(
             "Scalar by_color",
@@ -2557,6 +2573,7 @@ void ct_print_timing_stats(void) {
         );
 		print_bucket_cell_stats("Scalar");
     }
+#endif
 }
 
 void ct_free(cuckoo_trie* trie) {

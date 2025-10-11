@@ -13,6 +13,9 @@
 #include "util.h"
 #include "timing_helpers.h"
 
+// Control statistics collection (comment out for maximum performance)
+#define COLLECT_STATISTICS
+
 // Compile-time constants to avoid runtime calculations
 #define TAG_MASK_VALUE ((1ULL << TAG_BITS) - 1)
 #define PARENT_COLOR_MASK_VALUE ((0xFFULL << PARENT_COLOR_SHIFT) & 0xFF)
@@ -45,6 +48,7 @@
 #define HASH_MULTIPLIER 19
 #endif
 
+#ifdef COLLECT_STATISTICS
 // Global timing variables for scalar version
 static uint64_t find_by_color_total_cycles = 0;
 static uint64_t find_by_color_call_count = 0;
@@ -78,6 +82,7 @@ static uint64_t switch_case_counts[5] = {0}; // cases 0,1,2,3,4 from popcount
 // Stale data tracking counters
 static uint64_t prefilter_pass_count = 0;
 static uint64_t stale_data_caught_count = 0;
+#endif
 
 static inline int count_occupied_cells(ct_bucket* bucket, uint64_t tag_mask64, uint64_t tag_value64) {
     int count = 0;
@@ -424,6 +429,7 @@ static void print_bucket_cell_stats(const char *prefix) {
 }
 
 void ct_print_timing_stats(void) {
+#ifdef COLLECT_STATISTICS
     if (find_by_color_call_count > 0) {
         print_histogram_section(
             "Vectorized by_color",
@@ -453,13 +459,16 @@ void ct_print_timing_stats(void) {
         printf("Prefilter passes: %lu\n", prefilter_pass_count);
         printf("Stale data caught: %lu (%.2f%%)\n", stale_data_caught_count, stale_percentage);
     }
+#endif
 }
 
 
 ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
                                                            ct_entry_local_copy* result, uint64_t is_secondary,
                                                            uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
+#ifdef COLLECT_STATISTICS
     uint64_t start_cycles = rdtsc_start();
+#endif
     uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -483,9 +492,11 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     const uint64_t tag_mask64   = tag_low_mask << (8 * OFF_CAT);
     const uint64_t tag_value64  = (tag & tag_low_mask) << (8 * OFF_CAT);
 
+#ifdef COLLECT_STATISTICS
 	int occupied_cells = count_occupied_cells(bucket, tag_mask64, tag_value64);
 	bucket_occupancy_counts[occupied_cells]++;
 	switch_case_counts[occupied_cells]++;
+#endif
 
 #ifdef MULTITHREADING
     uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
@@ -499,11 +510,15 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     // skip empty quickly (TYPE_UNUSED == 0; TYPE_MASK selects type in byte 0)
     if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
         if ((h0 & header_mask) == header_values) {
+#ifdef COLLECT_STATISTICS
             prefilter_pass_count++;  // Prefilter passed
+#endif
             read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
 			#ifdef MULTITHREADING
 						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+#ifdef COLLECT_STATISTICS
                             stale_data_caught_count++;  // Stale data detected
+#endif
                             return NULL;
                         }
 						result->last_seq = start_counter;
@@ -511,8 +526,10 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
             result->last_pos = &(bucket->cells[0]);
             
             // Track bucket type and cell for successful searches
+#ifdef COLLECT_STATISTICS
             UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
                                        find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
+#endif
             return result->last_pos;
         }
     }
@@ -533,8 +550,10 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
             result->last_pos = &(bucket->cells[1]);
             
             // Track bucket type and cell for successful searches
+#ifdef COLLECT_STATISTICS
             UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
                                        find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
+#endif
             return result->last_pos;
         }
     }
@@ -555,8 +574,10 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
             result->last_pos = &(bucket->cells[2]);
             
             // Track bucket type and cell for successful searches
+#ifdef COLLECT_STATISTICS
             UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
                                        find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 2);
+#endif
             return result->last_pos;
         }
     }
@@ -575,18 +596,22 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
             result->last_pos = &(bucket->cells[3]);
             
             // Track bucket type and cell for successful searches
+#ifdef COLLECT_STATISTICS
             UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
                                        find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 3);
+#endif
             return result->last_pos;
         }
     }
 
     // Track bucket type for failed searches
+#ifdef COLLECT_STATISTICS
     if (is_secondary) {
         find_by_parent_secondary_bucket++;
     } else {
         find_by_parent_primary_bucket++;
     }
+#endif
 
     return NULL;
 }
@@ -604,7 +629,9 @@ ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
 												 ct_entry_local_copy* result, uint64_t is_secondary,
 												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	// uint64_t start_cycles = rdtsc_start();
+#ifdef COLLECT_STATISTICS
+	uint64_t start_cycles = rdtsc_start();
+#endif
 	int i;
 
 	uint64_t header_mask = 0;
@@ -665,8 +692,10 @@ ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-	//                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+#ifdef COLLECT_STATISTICS
+	UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+	                           find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
+#endif
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
@@ -676,7 +705,9 @@ ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
                                                           ct_entry_local_copy* result, uint64_t is_secondary,
                                                           uint64_t tag, uint64_t color) {
+#ifdef COLLECT_STATISTICS
     uint64_t start_cycles = rdtsc_start();
+#endif
 
     // ---- keep your original mask/value construction EXACTLY as-is ----
     uint64_t header_mask = 0;
@@ -743,8 +774,10 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 #endif
         result->last_pos = &(bucket->cells[i]);
         // ---- your stats (unchanged) ----
+#ifdef COLLECT_STATISTICS
         UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
 	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
+#endif
         return result->last_pos;
     }
 
@@ -780,8 +813,10 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 #endif
     result->last_pos = &(bucket->cells[i]);
     // ---- your stats (unchanged) ----
+#ifdef COLLECT_STATISTICS
     UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
 	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
+#endif
     return result->last_pos;
 }
 
@@ -796,7 +831,9 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
+#ifdef COLLECT_STATISTICS
 	uint64_t start_cycles = rdtsc_start();
+#endif
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -840,8 +877,10 @@ ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
+#ifdef COLLECT_STATISTICS
 	UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
 	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
+#endif
 	
 	if (!result->last_pos)
 		__builtin_unreachable();
