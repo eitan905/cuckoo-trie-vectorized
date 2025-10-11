@@ -45,6 +45,47 @@
 #define HASH_MULTIPLIER 19
 #endif
 
+// Global timing variables for scalar version
+static uint64_t find_by_color_total_cycles = 0;
+static uint64_t find_by_color_call_count = 0;
+static uint64_t find_by_parent_total_cycles = 0;
+static uint64_t find_by_parent_call_count = 0;
+
+// Histogram bins: 50-100, 100-150, ..., 500-550, 550+
+#define HIST_BINS 13
+static uint64_t find_by_color_hist[HIST_BINS] = {0};
+static uint64_t find_by_parent_hist[HIST_BINS] = {0};
+static uint64_t find_by_color_min = UINT64_MAX, find_by_color_max = 0;
+static uint64_t find_by_parent_min = UINT64_MAX, find_by_parent_max = 0;
+
+// Bucket and cell tracking for find_by_parent
+static uint64_t find_by_parent_primary_bucket = 0;
+static uint64_t find_by_parent_secondary_bucket = 0;
+static uint64_t find_by_parent_primary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for primary buckets
+static uint64_t find_by_parent_secondary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for secondary buckets
+
+// Bucket and cell tracking for find_by_color
+static uint64_t find_by_color_primary_bucket = 0;
+static uint64_t find_by_color_secondary_bucket = 0;
+static uint64_t find_by_color_primary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for primary buckets
+static uint64_t find_by_color_secondary_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found" for secondary buckets
+
+// Bucket occupancy tracking - how many cells pass prefilter per bucket
+static uint64_t bucket_occupancy_counts[5] = {0}; // 0,1,2,3,4 cells occupied per bucket
+
+static uint64_t switch_case_counts[5] = {0}; // cases 0,1,2,3,4 from popcount
+
+static inline int count_occupied_cells(ct_bucket* bucket, uint64_t tag_mask64, uint64_t tag_value64) {
+    int count = 0;
+    for (int i = 0; i < 4; i++) {
+        uint64_t h = *(const uint64_t*)&bucket->cells[i];
+        if (((uint8_t)h & TYPE_MASK) && ((h & tag_mask64) == tag_value64)) {
+            count++;
+        }
+    }
+    return count;
+}
+
 uint64_t ptr_to_bucket(cuckoo_trie* trie, ct_entry_storage* entry) {
 	return ((uintptr_t)entry - (uintptr_t)(trie->buckets)) / sizeof(ct_bucket);
 }
@@ -214,23 +255,6 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 	}
 }
 
-// Global timing variables for vectorized version
-static uint64_t find_by_color_total_cycles = 0;
-static uint64_t find_by_color_call_count = 0;
-static uint64_t find_by_parent_total_cycles = 0;
-static uint64_t find_by_parent_call_count = 0;
-
-// Histogram bins: 50-100, 100-150, ..., 500-550, 550+
-#define HIST_BINS 13
-static uint64_t find_by_color_hist[HIST_BINS] = {0};
-static uint64_t find_by_parent_hist[HIST_BINS] = {0};
-static uint64_t find_by_color_min = UINT64_MAX, find_by_color_max = 0;
-static uint64_t find_by_parent_min = UINT64_MAX, find_by_parent_max = 0;
-
-// Bucket and cell tracking for find_by_parent
-static uint64_t find_by_parent_primary_bucket = 0;
-static uint64_t find_by_parent_secondary_bucket = 0;
-static uint64_t find_by_parent_cell_counts[5] = {0}; // cells 0,1,2,3 and "not found"
 
 static inline uint64_t rdtsc_timing() {
     uint32_t lo, hi;
@@ -308,28 +332,90 @@ static void print_histogram_section(
     
 }
 
+// static void print_bucket_cell_stats(const char *prefix) {
+//     uint64_t total_calls = find_by_parent_primary_bucket + find_by_parent_secondary_bucket;
+//     if (total_calls == 0) return;
+    
+//     printf("\n===== %s Bucket/Cell Distribution =====\n", prefix);
+//     printf("Total find_by_parent calls: %lu\n", total_calls);
+//     printf("Primary bucket: %lu (%.1f%%)\n", find_by_parent_primary_bucket, 
+//            100.0 * find_by_parent_primary_bucket / total_calls);
+//     printf("Secondary bucket: %lu (%.1f%%)\n", find_by_parent_secondary_bucket,
+//            100.0 * find_by_parent_secondary_bucket / total_calls);
+    
+//     uint64_t total_cells = find_by_parent_cell_counts[0] + find_by_parent_cell_counts[1] + 
+//                           find_by_parent_cell_counts[2] + find_by_parent_cell_counts[3] + 
+//                           find_by_parent_cell_counts[4];
+//     if (total_cells > 0) {
+//         printf("Cell distribution:\n");
+//         for (int i = 0; i < 4; i++) {
+//             printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_cell_counts[i],
+//                    100.0 * find_by_parent_cell_counts[i] / total_cells);
+//         }
+//         printf("  Not found: %lu (%.1f%%)\n", find_by_parent_cell_counts[4],
+//                100.0 * find_by_parent_cell_counts[4] / total_cells);
+//     }
+// }
+
 static void print_bucket_cell_stats(const char *prefix) {
     uint64_t total_calls = find_by_parent_primary_bucket + find_by_parent_secondary_bucket;
     if (total_calls == 0) return;
     
-    printf("\n===== %s Bucket/Cell Distribution =====\n", prefix);
+    printf("\n===== %s find_by_parent Bucket/Cell Distribution =====\n", prefix);
     printf("Total find_by_parent calls: %lu\n", total_calls);
     printf("Primary bucket: %lu (%.1f%%)\n", find_by_parent_primary_bucket, 
            100.0 * find_by_parent_primary_bucket / total_calls);
     printf("Secondary bucket: %lu (%.1f%%)\n", find_by_parent_secondary_bucket,
            100.0 * find_by_parent_secondary_bucket / total_calls);
     
-    uint64_t total_cells = find_by_parent_cell_counts[0] + find_by_parent_cell_counts[1] + 
-                          find_by_parent_cell_counts[2] + find_by_parent_cell_counts[3] + 
-                          find_by_parent_cell_counts[4];
-    if (total_cells > 0) {
-        printf("Cell distribution:\n");
+    // Primary bucket cell distribution
+    uint64_t total_primary_cells = find_by_parent_primary_cell_counts[0] + find_by_parent_primary_cell_counts[1] + 
+                                  find_by_parent_primary_cell_counts[2] + find_by_parent_primary_cell_counts[3] + 
+                                  find_by_parent_primary_cell_counts[4];
+    if (total_primary_cells > 0) {
+        printf("Primary bucket cell distribution:\n");
         for (int i = 0; i < 4; i++) {
-            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_cell_counts[i],
-                   100.0 * find_by_parent_cell_counts[i] / total_cells);
+            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_primary_cell_counts[i],
+                   100.0 * find_by_parent_primary_cell_counts[i] / total_primary_cells);
         }
-        printf("  Not found: %lu (%.1f%%)\n", find_by_parent_cell_counts[4],
-               100.0 * find_by_parent_cell_counts[4] / total_cells);
+        printf("  Not found: %lu (%.1f%%)\n", find_by_parent_primary_cell_counts[4],
+               100.0 * find_by_parent_primary_cell_counts[4] / total_primary_cells);
+    }
+    
+    // Secondary bucket cell distribution
+    uint64_t total_secondary_cells = find_by_parent_secondary_cell_counts[0] + find_by_parent_secondary_cell_counts[1] + 
+                                    find_by_parent_secondary_cell_counts[2] + find_by_parent_secondary_cell_counts[3] + 
+                                    find_by_parent_secondary_cell_counts[4];
+    if (total_secondary_cells > 0) {
+        printf("Secondary bucket cell distribution:\n");
+        for (int i = 0; i < 4; i++) {
+            printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_secondary_cell_counts[i],
+                   100.0 * find_by_parent_secondary_cell_counts[i] / total_secondary_cells);
+        }
+        printf("  Not found: %lu (%.1f%%)\n", find_by_parent_secondary_cell_counts[4],
+               100.0 * find_by_parent_secondary_cell_counts[4] / total_secondary_cells);
+    }
+    
+    // Bucket occupancy distribution
+    uint64_t total_buckets = bucket_occupancy_counts[0] + bucket_occupancy_counts[1] + 
+                            bucket_occupancy_counts[2] + bucket_occupancy_counts[3] + bucket_occupancy_counts[4];
+    if (total_buckets > 0) {
+        printf("Bucket occupancy distribution (cells passing prefilter):\n");
+        for (int i = 0; i < 5; i++) {
+            printf("  %d cells: %lu (%.1f%%)\n", i, bucket_occupancy_counts[i],
+                   100.0 * bucket_occupancy_counts[i] / total_buckets);
+        }
+    }
+    
+    // Switch case distribution for branch prediction analysis
+    uint64_t total_switches = switch_case_counts[0] + switch_case_counts[1] + 
+                             switch_case_counts[2] + switch_case_counts[3] + switch_case_counts[4];
+    if (total_switches > 0) {
+        printf("Switch case distribution (branch prediction analysis):\n");
+        for (int i = 0; i < 5; i++) {
+            printf("  Case %d: %lu (%.1f%%)\n", i, switch_case_counts[i],
+                   100.0 * switch_case_counts[i] / total_switches);
+        }
     }
 }
 
@@ -361,8 +447,7 @@ void ct_print_timing_stats(void) {
 ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
                                                            ct_entry_local_copy* result, uint64_t is_secondary,
                                                            uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-    // uint64_t start_cycles = rdtsc_start();
-
+    uint64_t start_cycles = rdtsc_start();
     uint64_t header_mask = 0;
 	uint64_t header_values = 0;
 
@@ -386,6 +471,10 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     const uint64_t tag_mask64   = tag_low_mask << (8 * OFF_CAT);
     const uint64_t tag_value64  = (tag & tag_low_mask) << (8 * OFF_CAT);
 
+	int occupied_cells = count_occupied_cells(bucket, tag_mask64, tag_value64);
+	bucket_occupancy_counts[occupied_cells]++;
+	switch_case_counts[occupied_cells]++;
+
 #ifdef MULTITHREADING
     uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
     if (start_counter & SEQ_INCREMENT) return NULL;
@@ -393,10 +482,8 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     assert(bucket->write_lock_and_seq == 0);
 #endif
 
-    // ---- pair [0,1] ----
-    uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
-    uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
-
+    
+	uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
     // skip empty quickly (TYPE_UNUSED == 0; TYPE_MASK selects type in byte 0)
     if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
         if ((h0 & header_mask) == header_values) {
@@ -408,11 +495,14 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
             result->last_pos = &(bucket->cells[0]);
             
             // Track bucket type and cell for successful searches
-            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
+            UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                                       find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 0);
             return result->last_pos;
         }
     }
+
+	uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
+
     if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
         if ((h1 & header_mask) == header_values) {
             read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
@@ -423,15 +513,13 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
             result->last_pos = &(bucket->cells[1]);
             
             // Track bucket type and cell for successful searches
-            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
+            UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                                       find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 1);
             return result->last_pos;
         }
     }
 
-    // ---- pair [2,3] ----
     uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
-    uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
 
     if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) {
         if ((h2 & header_mask) == header_values) {
@@ -443,11 +531,12 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
             result->last_pos = &(bucket->cells[2]);
             
             // Track bucket type and cell for successful searches
-            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 2);
+            UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                                       find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 2);
             return result->last_pos;
         }
     }
+	uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
     if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) {
         if ((h3 & header_mask) == header_values) {
             read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
@@ -458,19 +547,18 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
             result->last_pos = &(bucket->cells[3]);
             
             // Track bucket type and cell for successful searches
-            // UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-            //                            find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 3);
+            UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
+                                       find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, 3);
             return result->last_pos;
         }
     }
 
     // Track bucket type for failed searches
-    // if (is_secondary) {
-    //     find_by_parent_secondary_bucket++;
-    // } else {
-    //     find_by_parent_primary_bucket++;
-    // }
-    // find_by_parent_cell_counts[4]++; // not found
+    if (is_secondary) {
+        find_by_parent_secondary_bucket++;
+    } else {
+        find_by_parent_primary_bucket++;
+    }
 
     return NULL;
 }
@@ -528,12 +616,13 @@ ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
 
 	if (i == CUCKOO_BUCKET_SIZE) {
 		// Track bucket type for failed searches
-		// if (is_secondary) {
-		// 	find_by_parent_secondary_bucket++;
-		// } else {
-		// 	find_by_parent_primary_bucket++;
-		// }
-		// find_by_parent_cell_counts[4]++; // not found
+		if (is_secondary) {
+			find_by_parent_secondary_bucket++;
+			find_by_parent_secondary_cell_counts[4]++; // not found
+		} else {
+			find_by_parent_primary_bucket++;
+			find_by_parent_primary_cell_counts[4]++; // not found
+		}
 		return NULL;
 	}
 
@@ -556,11 +645,10 @@ ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
 	return result->last_pos;
 }
 
-
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
                                                           ct_entry_local_copy* result, uint64_t is_secondary,
                                                           uint64_t tag, uint64_t color) {
-    // uint64_t start_cycles = rdtsc_start();
+    uint64_t start_cycles = rdtsc_start();
 
     // ---- keep your original mask/value construction EXACTLY as-is ----
     uint64_t header_mask = 0;
@@ -590,217 +678,83 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
     assert(bucket->write_lock_and_seq == 0);
 #endif
 
-    // ---- prefilter all 4 cells ----
+    // ---- pairwise check: [0,1] first, then [2,3] if needed ----
+    __m128i header_mask128 = _mm_set1_epi64x((long long)header_mask);
+    __m128i header_vals128 = _mm_set1_epi64x((long long)header_values);
+    __m128i tag_mask128 = _mm_set1_epi64x((long long)tag_mask64);
+    __m128i tag_vals128 = _mm_set1_epi64x((long long)tag_value64);
+    __m128i type_mask128 = _mm_set1_epi64x((long long)TYPE_MASK);
+
+    // Load headers 0,1
     uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
     uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
+
+    __m128i headers01 = _mm_set_epi64x((long long)h1, (long long)h0);
+    
+    // Tag prefilter: check TYPE_MASK and tag match
+    __m128i type_check = _mm_and_si128(headers01, type_mask128);
+    __m128i type_nonzero = _mm_cmpeq_epi64(type_check, _mm_setzero_si128()); // invert: 0 means non-zero
+    type_nonzero = _mm_xor_si128(type_nonzero, _mm_set1_epi64x(-1LL)); // flip bits
+    
+    __m128i tag_check = _mm_cmpeq_epi64(_mm_and_si128(headers01, tag_mask128), tag_vals128);
+    __m128i prefilter_pass = _mm_and_si128(type_nonzero, tag_check);
+    
+    // Full header check only for cells that pass prefilter
+    __m128i full_check = _mm_cmpeq_epi64(_mm_and_si128(headers01, header_mask128), header_vals128);
+    __m128i final_match = _mm_and_si128(prefilter_pass, full_check);
+    
+    unsigned m01 = (unsigned)_mm_movemask_epi8(final_match);
+
+    if (__builtin_expect(m01 != 0u, 1)) {
+        int i = (int)(__builtin_ctz(m01) >> 3);   // 0 or 1
+        read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+#ifdef MULTITHREADING
+        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
+            return NULL;
+        result->last_seq = start_counter;
+#endif
+        result->last_pos = &(bucket->cells[i]);
+        // ---- your stats (unchanged) ----
+        UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
+        return result->last_pos;
+    }
+
+    // Not found in [0,1] → check [2,3]
     uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
     uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
 
-    uint8_t prefilter_mask = 0;
-    if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) prefilter_mask |= 1;
-    if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) prefilter_mask |= 2;
-    if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) prefilter_mask |= 4;
-    if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) prefilter_mask |= 8;
+    __m128i headers23 = _mm_set_epi64x((long long)h3, (long long)h2);
+    
+    // Tag prefilter for [2,3]
+    type_check = _mm_and_si128(headers23, type_mask128);
+    type_nonzero = _mm_cmpeq_epi64(type_check, _mm_setzero_si128());
+    type_nonzero = _mm_xor_si128(type_nonzero, _mm_set1_epi64x(-1LL));
+    
+    tag_check = _mm_cmpeq_epi64(_mm_and_si128(headers23, tag_mask128), tag_vals128);
+    prefilter_pass = _mm_and_si128(type_nonzero, tag_check);
+    
+    // Full header check
+    full_check = _mm_cmpeq_epi64(_mm_and_si128(headers23, header_mask128), header_vals128);
+    final_match = _mm_and_si128(prefilter_pass, full_check);
+    
+    unsigned m23 = (unsigned)_mm_movemask_epi8(final_match);
 
-    int count = __builtin_popcount(prefilter_mask);
-    switch (count) {
-        case 0:
-            return NULL;
-        
-        case 1:
-            // Single cell - scalar check
-            if (prefilter_mask & 1) {
-                if ((h0 & header_mask) == header_values) {
-                    read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
-#ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                    result->last_seq = start_counter;
-#endif
-                    result->last_pos = &(bucket->cells[0]);
-                    // ---- your stats (unchanged) ----
-                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                    return result->last_pos;
-                }
-            } else if (prefilter_mask & 2) {
-                if ((h1 & header_mask) == header_values) {
-                    read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
-#ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                    result->last_seq = start_counter;
-#endif
-                    result->last_pos = &(bucket->cells[1]);
-                    // ---- your stats (unchanged) ----
-                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                    return result->last_pos;
-                }
-            } else if (prefilter_mask & 4) {
-                if ((h2 & header_mask) == header_values) {
-                    read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
-#ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                    result->last_seq = start_counter;
-#endif
-                    result->last_pos = &(bucket->cells[2]);
-                    // ---- your stats (unchanged) ----
-                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                    return result->last_pos;
-                }
-            } else if (prefilter_mask & 8) {
-                if ((h3 & header_mask) == header_values) {
-                    read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
-#ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                    result->last_seq = start_counter;
-#endif
-                    result->last_pos = &(bucket->cells[3]);
-                    // ---- your stats (unchanged) ----
-                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                    return result->last_pos;
-                }
-            }
-            return NULL;
+    if (__builtin_expect(m23 == 0u, 1))
+        return NULL;
 
-        case 2:
-            // Two cells - use 2-wide SIMD if adjacent pairs, otherwise scalar
-            if (prefilter_mask == 3) { // cells 0,1
-                __m128i mask128 = _mm_set1_epi64x((long long)header_mask);
-                __m128i vals128 = _mm_set1_epi64x((long long)header_values);
-                __m128i headers01 = _mm_set_epi64x((long long)h1, (long long)h0);
-                __m128i cmp01 = _mm_cmpeq_epi64(_mm_and_si128(headers01, mask128), vals128);
-                unsigned m01 = (unsigned)_mm_movemask_epi8(cmp01);
-                
-                if (m01 != 0) {
-                    int i = (int)(__builtin_ctz(m01) >> 3);
-                    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
+    int i = 2 + (int)(__builtin_ctz(m23) >> 3);   // 2 or 3
+    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
 #ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                    result->last_seq = start_counter;
+    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter)
+        return NULL;
+    result->last_seq = start_counter;
 #endif
-                    result->last_pos = &(bucket->cells[i]);
-                    // ---- your stats (unchanged) ----
-                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                    return result->last_pos;
-                }
-            } else if (prefilter_mask == 12) { // cells 2,3
-                __m128i mask128 = _mm_set1_epi64x((long long)header_mask);
-                __m128i vals128 = _mm_set1_epi64x((long long)header_values);
-                __m128i headers23 = _mm_set_epi64x((long long)h3, (long long)h2);
-                __m128i cmp23 = _mm_cmpeq_epi64(_mm_and_si128(headers23, mask128), vals128);
-                unsigned m23 = (unsigned)_mm_movemask_epi8(cmp23);
-                
-                if (m23 != 0) {
-                    int i = 2 + (int)(__builtin_ctz(m23) >> 3);
-                    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
-#ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                    result->last_seq = start_counter;
-#endif
-                    result->last_pos = &(bucket->cells[i]);
-                    // ---- your stats (unchanged) ----
-                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                    return result->last_pos;
-                }
-            } else {
-                // Non-adjacent pairs - use scalar checks
-                if (prefilter_mask & 1) {
-                    if ((h0 & header_mask) == header_values) {
-                        read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
-#ifdef MULTITHREADING
-                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                        result->last_seq = start_counter;
-#endif
-                        result->last_pos = &(bucket->cells[0]);
-                        // ---- your stats (unchanged) ----
-                        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                        return result->last_pos;
-                    }
-                }
-                if (prefilter_mask & 2) {
-                    if ((h1 & header_mask) == header_values) {
-                        read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
-#ifdef MULTITHREADING
-                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                        result->last_seq = start_counter;
-#endif
-                        result->last_pos = &(bucket->cells[1]);
-                        // ---- your stats (unchanged) ----
-                        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                        return result->last_pos;
-                    }
-                }
-                if (prefilter_mask & 4) {
-                    if ((h2 & header_mask) == header_values) {
-                        read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
-#ifdef MULTITHREADING
-                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                        result->last_seq = start_counter;
-#endif
-                        result->last_pos = &(bucket->cells[2]);
-                        // ---- your stats (unchanged) ----
-                        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                        return result->last_pos;
-                    }
-                }
-                if (prefilter_mask & 8) {
-                    if ((h3 & header_mask) == header_values) {
-                        read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
-#ifdef MULTITHREADING
-                        if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                        result->last_seq = start_counter;
-#endif
-                        result->last_pos = &(bucket->cells[3]);
-                        // ---- your stats (unchanged) ----
-                        // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                        //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                        return result->last_pos;
-                    }
-                }
-            }
-            return NULL;
-
-        case 3:
-        case 4:
-            // 3 or 4 cells - use 4-wide AVX2 SIMD
-            {
-                __m256i mask256 = _mm256_set1_epi64x((long long)header_mask);
-                __m256i vals256 = _mm256_set1_epi64x((long long)header_values);
-                __m256i headers = _mm256_set_epi64x((long long)h3, (long long)h2, (long long)h1, (long long)h0);
-                __m256i cmp = _mm256_cmpeq_epi64(_mm256_and_si256(headers, mask256), vals256);
-                unsigned m = (unsigned)_mm256_movemask_epi8(cmp);
-                
-                // Mask out results that didn't pass prefilter
-                if (!(prefilter_mask & 1)) m &= ~0x000000FF; // clear bits for h0
-                if (!(prefilter_mask & 2)) m &= ~0x0000FF00; // clear bits for h1
-                if (!(prefilter_mask & 4)) m &= ~0x00FF0000; // clear bits for h2
-                if (!(prefilter_mask & 8)) m &= ~0xFF000000; // clear bits for h3
-                
-                if (m != 0) {
-                    int i = (int)(__builtin_ctz(m) >> 3);
-                    read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
-#ifdef MULTITHREADING
-                    if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
-                    result->last_seq = start_counter;
-#endif
-                    result->last_pos = &(bucket->cells[i]);
-                    // ---- your stats (unchanged) ----
-                    // UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-                    //                    find_by_color_min, find_by_color_max, find_by_color_hist);
-                    return result->last_pos;
-                }
-            }
-            return NULL;
-    }
-
-    return NULL;
+    result->last_pos = &(bucket->cells[i]);
+    // ---- your stats (unchanged) ----
+    UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
+    return result->last_pos;
 }
 
 
@@ -814,7 +768,7 @@ ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
 ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
 												ct_entry_local_copy* result, uint64_t is_secondary,
 												uint64_t tag, uint64_t color) {
-	// uint64_t start_cycles = rdtsc_start();
+	uint64_t start_cycles = rdtsc_start();
 	int i;
 	uint64_t header_mask = 0;
 	uint64_t header_values = 0;
@@ -858,8 +812,8 @@ ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
 
 	result->last_pos = &(bucket->cells[i]);
 	
-	// UPDATE_TIMING_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-	//                    find_by_color_min, find_by_color_max, find_by_color_hist);
+	UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
+	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
 	
 	if (!result->last_pos)
 		__builtin_unreachable();

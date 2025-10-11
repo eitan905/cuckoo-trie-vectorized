@@ -47,10 +47,12 @@ benchmarks=(
     "pos-lookup"
     "mt-pos-lookup --threads 4"
     "mt-pos-lookup --threads 8"
-    "ycsb-c"
-    "ycsb-d"
+    "ycsb-a"
+    "mt-ycsb-a --threads 8"
+    "ycsb-f"
+    "mt-ycsb-f --threads 8"
     "insert"
-)
+    )
 
 key_sizes=("rand-8" "rand-64" "rand-256")
 
