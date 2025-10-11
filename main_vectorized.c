@@ -75,6 +75,10 @@ static uint64_t bucket_occupancy_counts[5] = {0}; // 0,1,2,3,4 cells occupied pe
 
 static uint64_t switch_case_counts[5] = {0}; // cases 0,1,2,3,4 from popcount
 
+// Stale data tracking counters
+static uint64_t prefilter_pass_count = 0;
+static uint64_t stale_data_caught_count = 0;
+
 static inline int count_occupied_cells(ct_bucket* bucket, uint64_t tag_mask64, uint64_t tag_value64) {
     int count = 0;
     for (int i = 0; i < 4; i++) {
@@ -441,6 +445,14 @@ void ct_print_timing_stats(void) {
         );
     }
     print_bucket_cell_stats("Vectorized");
+    
+    // Stale data statistics
+    if (prefilter_pass_count > 0) {
+        double stale_percentage = (double)stale_data_caught_count / prefilter_pass_count * 100.0;
+        printf("\n===== Stale Data Detection =====\n");
+        printf("Prefilter passes: %lu\n", prefilter_pass_count);
+        printf("Stale data caught: %lu (%.2f%%)\n", stale_data_caught_count, stale_percentage);
+    }
 }
 
 
@@ -487,9 +499,13 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
     // skip empty quickly (TYPE_UNUSED == 0; TYPE_MASK selects type in byte 0)
     if (((uint8_t)h0 & TYPE_MASK) && ((h0 & tag_mask64) == tag_value64)) {
         if ((h0 & header_mask) == header_values) {
+            prefilter_pass_count++;  // Prefilter passed
             read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
 			#ifdef MULTITHREADING
-						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+                            stale_data_caught_count++;  // Stale data detected
+                            return NULL;
+                        }
 						result->last_seq = start_counter;
 			#endif
             result->last_pos = &(bucket->cells[0]);
@@ -505,9 +521,13 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
     if (((uint8_t)h1 & TYPE_MASK) && ((h1 & tag_mask64) == tag_value64)) {
         if ((h1 & header_mask) == header_values) {
+            prefilter_pass_count++;  // Prefilter passed
             read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
 			#ifdef MULTITHREADING
-						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+                            stale_data_caught_count++;  // Stale data detected
+                            return NULL;
+                        }
 						result->last_seq = start_counter;
 			#endif
             result->last_pos = &(bucket->cells[1]);
@@ -523,9 +543,13 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 
     if (((uint8_t)h2 & TYPE_MASK) && ((h2 & tag_mask64) == tag_value64)) {
         if ((h2 & header_mask) == header_values) {
+            prefilter_pass_count++;  // Prefilter passed
             read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
 			#ifdef MULTITHREADING
-						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+                            stale_data_caught_count++;  // Stale data detected
+                            return NULL;
+                        }
 						result->last_seq = start_counter;
 			#endif
             result->last_pos = &(bucket->cells[2]);
@@ -539,9 +563,13 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 	uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
     if (((uint8_t)h3 & TYPE_MASK) && ((h3 & tag_mask64) == tag_value64)) {
         if ((h3 & header_mask) == header_values) {
+            prefilter_pass_count++;  // Prefilter passed
             read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
 			#ifdef MULTITHREADING
-				if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) return NULL;
+				if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
+                    stale_data_caught_count++;  // Stale data detected
+                    return NULL;
+                }
 				result->last_seq = start_counter;
 			#endif
             result->last_pos = &(bucket->cells[3]);
