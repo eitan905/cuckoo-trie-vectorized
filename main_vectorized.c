@@ -23,7 +23,6 @@
 // The following value was arbitrarily chosen.
 #define ROOT_LAST_SYMBOL 0
 
-// Vectorized-only implementation - no runtime branching
 
 // Children of jump nodes (and the root) use this as parent_color, so that
 // they aren't mistakenly considered children of bitmap nodes.
@@ -262,12 +261,6 @@ void prefetch_bucket_pair(cuckoo_trie* trie, uint64_t primary_bucket, uint8_t ta
 }
 
 
-static inline uint64_t rdtsc_timing() {
-    uint32_t lo, hi;
-    __asm__ __volatile__ ("rdtsc" : "=a" (lo), "=d" (hi));
-    return ((uint64_t)hi << 32) | lo;
-}
-
 static inline uint64_t rdtsc_start() {
     unsigned lo, hi;
     __asm__ __volatile__("lfence\n\trdtsc" : "=a"(lo), "=d"(hi) :: "memory");
@@ -338,30 +331,6 @@ static void print_histogram_section(
     
 }
 
-// static void print_bucket_cell_stats(const char *prefix) {
-//     uint64_t total_calls = find_by_parent_primary_bucket + find_by_parent_secondary_bucket;
-//     if (total_calls == 0) return;
-    
-//     printf("\n===== %s Bucket/Cell Distribution =====\n", prefix);
-//     printf("Total find_by_parent calls: %lu\n", total_calls);
-//     printf("Primary bucket: %lu (%.1f%%)\n", find_by_parent_primary_bucket, 
-//            100.0 * find_by_parent_primary_bucket / total_calls);
-//     printf("Secondary bucket: %lu (%.1f%%)\n", find_by_parent_secondary_bucket,
-//            100.0 * find_by_parent_secondary_bucket / total_calls);
-    
-//     uint64_t total_cells = find_by_parent_cell_counts[0] + find_by_parent_cell_counts[1] + 
-//                           find_by_parent_cell_counts[2] + find_by_parent_cell_counts[3] + 
-//                           find_by_parent_cell_counts[4];
-//     if (total_cells > 0) {
-//         printf("Cell distribution:\n");
-//         for (int i = 0; i < 4; i++) {
-//             printf("  Cell %d: %lu (%.1f%%)\n", i, find_by_parent_cell_counts[i],
-//                    100.0 * find_by_parent_cell_counts[i] / total_cells);
-//         }
-//         printf("  Not found: %lu (%.1f%%)\n", find_by_parent_cell_counts[4],
-//                100.0 * find_by_parent_cell_counts[4] / total_cells);
-//     }
-// }
 
 #ifdef COLLECT_STATISTICS
 static void print_bucket_cell_stats(const char *prefix) {
@@ -628,93 +597,6 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 }
 
 
-
-
-ct_entry_storage* find_entry_in_bucket_by_parent(ct_bucket* bucket,
-												 ct_entry_local_copy* result, uint64_t is_secondary,
-												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-	return find_entry_in_bucket_by_parent_vectorized(bucket, result, is_secondary, tag, last_symbol, parent_color);
-}
-
-
-ct_entry_storage* find_entry_in_bucket_by_parentt(ct_bucket* bucket,
-												 ct_entry_local_copy* result, uint64_t is_secondary,
-												 uint64_t tag, uint64_t last_symbol, uint64_t parent_color) {
-#ifdef COLLECT_STATISTICS
-	uint64_t start_cycles = rdtsc_start();
-#endif
-	int i;
-
-	uint64_t header_mask = 0;
-	uint64_t header_values = 0;
-
-	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
-
-	header_mask |= 0xFFULL << (8*offsetof(ct_entry, last_symbol));
-	header_values |= last_symbol << (8*offsetof(ct_entry, last_symbol));
-
-	const uint64_t parent_color_mask = (0xFFULL << PARENT_COLOR_SHIFT) & 0xFF;
-	header_mask |= parent_color_mask << (8*offsetof(ct_entry, parent_color_and_flags));
-	header_values |= parent_color << (8*offsetof(ct_entry, parent_color_and_flags) + PARENT_COLOR_SHIFT);
-
-	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-	if (is_secondary)
-		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-
-#ifdef MULTITHREADING
-	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
-	if (start_counter & SEQ_INCREMENT)
-		return NULL;   // Bucket is being written. The retry loop will call us again.
-#else
-	assert(bucket->write_lock_and_seq == 0);
-#endif
-
-	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-		read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
-
-		uint64_t header = *((uint64_t*) (&(result->value)));
-		if ((header & header_mask) == header_values) {
-			assert(entry_type(&(result->value)) != TYPE_UNUSED);
-			break;
-		}
-	}
-
-	if (i == CUCKOO_BUCKET_SIZE) {
-		// Track bucket type for failed searches
-#ifdef COLLECT_STATISTICS
-		if (is_secondary) {
-			find_by_parent_secondary_bucket++;
-			find_by_parent_secondary_cell_counts[4]++; // not found
-		} else {
-			find_by_parent_primary_bucket++;
-			find_by_parent_primary_cell_counts[4]++; // not found
-		}
-#endif
-		return NULL;
-	}
-
-#ifdef MULTITHREADING
-	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
-		// The bucket changed while we read it. We rely on the retry loop in
-		// find_entry_in_pair_by_parent to call us again
-		return NULL;
-	}
-	result->last_seq = start_counter;
-#endif
-
-	result->last_pos = &(bucket->cells[i]);
-	
-#ifdef COLLECT_STATISTICS
-	UPDATE_FIND_BY_PARENT_STATS(start_cycles, find_by_parent_total_cycles, find_by_parent_call_count,
-	                           find_by_parent_min, find_by_parent_max, find_by_parent_hist, is_secondary, i);
-#endif
-	
-	if (!result->last_pos)
-		__builtin_unreachable();
-	return result->last_pos;
-}
-
 ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
                                                           ct_entry_local_copy* result, uint64_t is_secondary,
                                                           uint64_t tag, uint64_t color) {
@@ -834,80 +716,10 @@ ct_entry_storage* find_entry_in_bucket_by_color_vectorized(ct_bucket* bucket,
 }
 
 
-
-ct_entry_storage* find_entry_in_bucket_by_color(ct_bucket* bucket,
-												ct_entry_local_copy* result, uint64_t is_secondary,
-												uint64_t tag, uint64_t color) {
-	return find_entry_in_bucket_by_color_vectorized(bucket, result, is_secondary, tag, color);
-}
-
-ct_entry_storage* find_entry_in_bucket_by_colorr(ct_bucket* bucket,
-												ct_entry_local_copy* result, uint64_t is_secondary,
-												uint64_t tag, uint64_t color) {
-#ifdef COLLECT_STATISTICS
-	uint64_t start_cycles = rdtsc_start();
-#endif
-	int i;
-	uint64_t header_mask = 0;
-	uint64_t header_values = 0;
-
-	header_mask |= ((1ULL << TAG_BITS) - 1) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= tag << (8*offsetof(ct_entry, color_and_tag));
-
-	header_mask |= ((uint64_t)((0xFF << TAG_BITS) & 0xFF)) << (8*offsetof(ct_entry, color_and_tag));
-	header_values |= color << (8*offsetof(ct_entry, color_and_tag) + TAG_BITS);
-
-	header_mask |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-	if (is_secondary)
-		header_values |= FLAG_SECONDARY_BUCKET << (8*offsetof(ct_entry, parent_color_and_flags));
-
-#ifdef MULTITHREADING
-	uint32_t start_counter = read_int_atomic(&(bucket->write_lock_and_seq));
-	if (start_counter & SEQ_INCREMENT)
-		return NULL;   // Bucket is being written. The retry loop will call us again.
-#else
-	assert(bucket->write_lock_and_seq == 0);
-#endif
-
-	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
-		read_entry_non_atomic(&(bucket->cells[i]), &(result->value));
-
-		uint64_t header = *((uint64_t*) (&(result->value)));
-		if ((header & header_mask) == header_values)
-			break;
-	}
-	if (i == CUCKOO_BUCKET_SIZE)
-		return NULL;
-
-#ifdef MULTITHREADING
-	if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
-		// The bucket changed while we read it. We rely on the retry loop in
-		// find_entry_in_pair_by_color to call us again
-		return NULL;
-	}
-	result->last_seq = start_counter;
-#endif
-
-	result->last_pos = &(bucket->cells[i]);
-	
-#ifdef COLLECT_STATISTICS
-	UPDATE_FIND_BY_COLOR_STATS(start_cycles, find_by_color_total_cycles, find_by_color_call_count,
-	                           find_by_color_min, find_by_color_max, find_by_color_hist, is_secondary, i);
-#endif
-	
-	if (!result->last_pos)
-		__builtin_unreachable();
-	return result->last_pos;
-}
-
-
-
 // Searches for an entry with color <color> in the specified pair. Copies the entry
 // found to <result> and also returns its address. Assumes the entry is in the pair.
 // Note: When multithreading, the returned address is meaningless, as the entry might
 //       have been moved since it was read. Use only the value written into <result>
-
-
 ct_entry_storage* find_entry_in_pair_by_color(cuckoo_trie* trie, ct_entry_local_copy* result,
 											  uint64_t primary_bucket, uint64_t tag,
 											  uint8_t color) {
@@ -915,12 +727,12 @@ ct_entry_storage* find_entry_in_pair_by_color(cuckoo_trie* trie, ct_entry_local_
 	uint64_t count = 0;
 
 	while (1) {
-		entry_addr = find_entry_in_bucket_by_color(&(trie->buckets[primary_bucket]), result, 0, tag, color);
+		entry_addr = find_entry_in_bucket_by_color_vectorized(&(trie->buckets[primary_bucket]), result, 0, tag, color);
 		if (entry_addr)
 			break;
 
 		uint64_t secondary_bucket = mix_bucket(trie, primary_bucket, tag);
-		entry_addr = find_entry_in_bucket_by_color(&(trie->buckets[secondary_bucket]), result, 1, tag, color);
+		entry_addr = find_entry_in_bucket_by_color_vectorized(&(trie->buckets[secondary_bucket]), result, 1, tag, color);
 		if (entry_addr)
 			break;
 
@@ -944,13 +756,13 @@ ct_entry_storage* find_entry_in_pair_by_parent(cuckoo_trie* trie, ct_entry_local
 	uint64_t count = 0;
 
 	while (1) {
-		entry_addr = find_entry_in_bucket_by_parent(&(trie->buckets[primary_bucket]), result, 0, tag,
+		entry_addr = find_entry_in_bucket_by_parent_vectorized(&(trie->buckets[primary_bucket]), result, 0, tag,
 													last_symbol, parent_color);
 		if (entry_addr)
 			break;
 
 		uint64_t secondary_bucket_num = mix_bucket(trie, primary_bucket, tag);
-		entry_addr = find_entry_in_bucket_by_parent(&(trie->buckets[secondary_bucket_num]), result, 1, tag,
+		entry_addr = find_entry_in_bucket_by_parent_vectorized(&(trie->buckets[secondary_bucket_num]), result, 1, tag,
 													last_symbol, parent_color);
 		if (entry_addr)
 			break;
@@ -963,43 +775,7 @@ ct_entry_storage* find_entry_in_pair_by_parent(cuckoo_trie* trie, ct_entry_local
 	return entry_addr;
 }
 
-ct_entry_storage* find_free_cell_in_bucket_vectorized(ct_bucket* bucket) {
-    // Compare TYPE bits of two headers at a time: [0,1] → early return; else [2,3].
-    __m128i type_mask128 = _mm_set1_epi64x((long long)TYPE_MASK);
-    __m128i unused128    = _mm_set1_epi64x((long long)TYPE_UNUSED);
-
-    // --- pair [0,1] ---
-    uint64_t h0 = *(const uint64_t*)&bucket->cells[0];
-    uint64_t h1 = *(const uint64_t*)&bucket->cells[1];
-
-    __m128i headers01 = _mm_set_epi64x((long long)h1, (long long)h0);
-    __m128i cmp01     = _mm_cmpeq_epi64(_mm_and_si128(headers01, type_mask128), unused128);
-    unsigned m01      = (unsigned)_mm_movemask_epi8(cmp01);
-    if (__builtin_expect(m01 != 0u, 1)) {
-        int idx = (int)(__builtin_ctz(m01) >> 3);   // 0 or 1
-        return &bucket->cells[idx];
-    }
-
-    // --- pair [2,3] ---
-    uint64_t h2 = *(const uint64_t*)&bucket->cells[2];
-    uint64_t h3 = *(const uint64_t*)&bucket->cells[3];
-
-    __m128i headers23 = _mm_set_epi64x((long long)h3, (long long)h2);
-    __m128i cmp23     = _mm_cmpeq_epi64(_mm_and_si128(headers23, type_mask128), unused128);
-    unsigned m23      = (unsigned)_mm_movemask_epi8(cmp23);
-    if (__builtin_expect(m23 == 0u, 1))
-        return NULL;
-
-    int idx = 2 + (int)(__builtin_ctz(m23) >> 3);   // 2 or 3
-    return &bucket->cells[idx];
-}
-
-
 ct_entry_storage* find_free_cell_in_bucket(ct_bucket* bucket) {
-	return find_free_cell_in_bucket_vectorized(bucket);
-}
-
-ct_entry_storage* find_free_cell_in_buckett(ct_bucket* bucket) {
 	int i;
 
 	for (i = 0;i < CUCKOO_BUCKET_SIZE;i++) {
@@ -1369,17 +1145,6 @@ void extend_jump_node(ct_entry* jump_node, uint64_t symbol) {
 	jump_node->child_color_and_jump_size++;
 }
 
-static inline __m256i load_bucket_headers4(const ct_bucket* b) {
-    __m128i a0 = _mm_loadl_epi64((const __m128i*)&b->cells[0]);
-    __m128i a1 = _mm_loadl_epi64((const __m128i*)&b->cells[1]);
-    __m128i lo = _mm_unpacklo_epi64(a0, a1);  // [c1,c0]
-
-    __m128i a2 = _mm_loadl_epi64((const __m128i*)&b->cells[2]);
-    __m128i a3 = _mm_loadl_epi64((const __m128i*)&b->cells[3]);
-    __m128i hi = _mm_unpacklo_epi64(a2, a3);  // [c3,c2]
-
-    return _mm256_inserti128_si256(_mm256_castsi128_si256(lo), hi, 1);
-}
 
 uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) {
 	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors will overflow
@@ -1422,11 +1187,11 @@ uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) 
 	return __builtin_ctzll(~used_colors);
 }
 
-// uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
-// 	return unused_color_in_pair_vectorized(bucket1, bucket2);
-// }
-
 uint8_t unused_color_in_pair(ct_bucket* bucket1, ct_bucket* bucket2) {
+	return unused_color_in_pair_vectorized(bucket1, bucket2);
+}
+
+uint8_t unused_color_in_pairr(ct_bucket* bucket1, ct_bucket* bucket2) {
 	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors_will overflow
 	uint64_t used_colors = 0;
 	int i;
@@ -2415,63 +2180,28 @@ uint64_t read_qword_zfill(const uint8_t* from, uint64_t size) {
 	return __builtin_ia32_bzhi_di(tmp, 8*size);
 }
 
-void key_to_symbols_vectorized(const uint8_t* key, uint64_t size, uint8_t* symbols) {
+
+void key_to_symbols(const uint8_t* key, uint64_t size, uint8_t* symbols) {
 	// We have 2**BITS_PER_SYMBOL + 1 different symbols, and each should fit in  a byte
 	assert(BITS_PER_SYMBOL < 8);
 
 	const uint64_t ones = 0x0101010101010101ULL;
-	const __m256i ones_vec = _mm256_set1_epi64x((long long)ones);
-	const __m256i fanout_mask = _mm256_set1_epi64x((long long)(FANOUT - 1));
 
 	int64_t bytes_left = size;
 	const uint8_t* key_ptr = key;
 	uint8_t* next_sym_ptr = symbols;
 
-	// Process 4 qwords at a time with AVX2
-	while (bytes_left >= 4 * BITS_PER_SYMBOL) {
-		// Load 4 qwords
-		__m256i key_qwords = _mm256_set_epi64x(
-			(long long)__builtin_bswap64(read_qword_zfill(key_ptr + 3*BITS_PER_SYMBOL, BITS_PER_SYMBOL)),
-			(long long)__builtin_bswap64(read_qword_zfill(key_ptr + 2*BITS_PER_SYMBOL, BITS_PER_SYMBOL)),
-			(long long)__builtin_bswap64(read_qword_zfill(key_ptr + 1*BITS_PER_SYMBOL, BITS_PER_SYMBOL)),
-			(long long)__builtin_bswap64(read_qword_zfill(key_ptr, BITS_PER_SYMBOL))
-		);
-
-		// Shift all qwords
-		key_qwords = _mm256_srli_epi64(key_qwords, 64 - 8*BITS_PER_SYMBOL);
-
-		// Apply pdep to all 4 qwords in parallel (unfortunately pdep is not vectorized, so we extract)
-		uint64_t qw[4];
-		_mm256_storeu_si256((__m256i*)qw, key_qwords);
-		
-		__m256i results = _mm256_set_epi64x(
-			(long long)(__builtin_bswap64(__builtin_ia32_pdep_di(qw[3], ones * (FANOUT - 1)) + ones)),
-			(long long)(__builtin_bswap64(__builtin_ia32_pdep_di(qw[2], ones * (FANOUT - 1)) + ones)),
-			(long long)(__builtin_bswap64(__builtin_ia32_pdep_di(qw[1], ones * (FANOUT - 1)) + ones)),
-			(long long)(__builtin_bswap64(__builtin_ia32_pdep_di(qw[0], ones * (FANOUT - 1)) + ones))
-		);
-
-		// Store results
-		_mm256_storeu_si256((__m256i*)next_sym_ptr, results);
-		
-		next_sym_ptr += 32; // 4 * 8 bytes
-		key_ptr += 4 * BITS_PER_SYMBOL;
-		bytes_left -= 4 * BITS_PER_SYMBOL;
-	}
-
-	// Handle remaining bytes with original scalar code
 	while (bytes_left > 0) {
 		uint64_t key_qword = __builtin_bswap64(read_qword_zfill(key_ptr, bytes_left));
+
+		// pdep works on the low bits, move key bytes there.
 		key_qword >>= (64 - 8*BITS_PER_SYMBOL);
+
 		*((uint64_t*)next_sym_ptr) = __builtin_bswap64(__builtin_ia32_pdep_di(key_qword, ones * (FANOUT - 1)) + ones);
 		next_sym_ptr += 8;
 		key_ptr += BITS_PER_SYMBOL;
 		bytes_left -= BITS_PER_SYMBOL;
 	}
-}
-
-void key_to_symbols(const uint8_t* key, uint64_t size, uint8_t* symbols) {
-	key_to_symbols_vectorized(key, size, symbols);
 }
 
 typedef struct {
@@ -2484,15 +2214,14 @@ typedef struct {
 	uint64_t num_key_symbols;
 } key_prefetcher;
 
-static inline void prefetcher_start_vectorized(key_prefetcher* p, cuckoo_trie* trie, uint64_t key_size,
-											   uint8_t* key_bytes) {
+
+static inline void prefetcher_start(key_prefetcher* p, cuckoo_trie* trie, uint64_t key_size,
+									uint8_t* key_bytes) {
 	int i;
 	p->num_key_symbols = (key_size * 8 + BITS_PER_SYMBOL - 1) / BITS_PER_SYMBOL + 1;
-	key_to_symbols_vectorized(key_bytes, key_size, p->key_symbols);
+	key_to_symbols(key_bytes, key_size, p->key_symbols);
 	p->key_symbols[p->num_key_symbols - 1] = SYMBOL_END;
 	p->prefetch_prefix_hash = HASH_START_VALUE;
-	
-	// Process first 4 symbols (sequential dependency prevents full vectorization)
 	for (i = 0; i < 4 && i < p->num_key_symbols; i++) {
 		assert(p->key_symbols[i] == get_string_symbol(key_size, key_bytes, i));
 		p->prefetch_prefix_hash = accumulate_hash(trie, p->prefetch_prefix_hash, p->key_symbols[i]);
@@ -2500,11 +2229,6 @@ static inline void prefetcher_start_vectorized(key_prefetcher* p, cuckoo_trie* t
 		prefetch_bucket_pair(trie, hash_to_bucket(p->prefetch_prefix_hash), hash_to_tag(p->prefetch_prefix_hash));
 	}
 	p->prefetch_pos = i;
-}
-
-static inline void prefetcher_start(key_prefetcher* p, cuckoo_trie* trie, uint64_t key_size,
-									uint8_t* key_bytes) {
-	prefetcher_start_vectorized(p, trie, key_size, key_bytes);
 }
 
 static inline void prefetcher_step(key_prefetcher* p, cuckoo_trie* trie) {

@@ -28,14 +28,6 @@ echo "Timestamp: $TIMESTAMP" | tee -a $RESULTS_FILE
 echo "Runs per test: $RUNS" | tee -a $RESULTS_FILE
 echo "Benchmark binary: $BENCHMARK_BINARY" | tee -a $RESULTS_FILE
 
-# Check if vectorization is enabled by examining the Makefile
-if grep -q "\-DUSE_VECTORIZED_SEARCH" Makefile; then
-    VECTORIZATION_STATUS="ENABLED"
-else
-    VECTORIZATION_STATUS="DISABLED"
-fi
-echo "Vectorization: $VECTORIZATION_STATUS" | tee -a $RESULTS_FILE
-
 echo | tee -a $RESULTS_FILE
 
 # Use current directory or script directory
