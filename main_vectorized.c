@@ -1146,7 +1146,58 @@ void extend_jump_node(ct_entry* jump_node, uint64_t symbol) {
 }
 
 
+uint8_t unused_color_in_pair_avx512(ct_bucket* bucket1, ct_bucket* bucket2) {
+	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors will overflow
+	
+	// Load all 8 headers in a single 512-bit vector
+	__m512i all_headers = _mm512_set_epi64(
+		*((uint64_t*)&bucket2->cells[3]),  // Lane 7
+		*((uint64_t*)&bucket2->cells[2]),  // Lane 6
+		*((uint64_t*)&bucket2->cells[1]),  // Lane 5
+		*((uint64_t*)&bucket2->cells[0]),  // Lane 4
+		*((uint64_t*)&bucket1->cells[3]),  // Lane 3
+		*((uint64_t*)&bucket1->cells[2]),  // Lane 2
+		*((uint64_t*)&bucket1->cells[1]),  // Lane 1
+		*((uint64_t*)&bucket1->cells[0])   // Lane 0
+	);
+	
+	// Extract color_and_tag field and shift to get color
+	__m512i color_mask = _mm512_set1_epi64(0xFFULL << (8 * offsetof(ct_entry, color_and_tag)));
+	__m512i colors = _mm512_and_si512(all_headers, color_mask);
+	colors = _mm512_srli_epi64(colors, (8 * offsetof(ct_entry, color_and_tag)) + TAG_BITS);
+	
+	// Create bitmasks using vectorized bit shifts
+	__m512i ones = _mm512_set1_epi64(1ULL);
+	__m512i bits = _mm512_sllv_epi64(ones, colors);  // 1ULL << color for all 8 lanes
+	
+	// Horizontal OR to combine all lanes into single bitmask
+	uint64_t lanes[8];
+	_mm512_storeu_si512((__m512i*)lanes, bits);
+	uint64_t used_colors = lanes[0] | lanes[1] | lanes[2] | lanes[3] | 
+	                       lanes[4] | lanes[5] | lanes[6] | lanes[7];
+
+	const uint64_t all_valid_colors = (1ULL << (MAX_VALID_COLOR + 1)) - 1;
+	assert((used_colors & all_valid_colors) != all_valid_colors);
+	return __builtin_ctzll(~used_colors);
+}
+
 uint8_t unused_color_in_pair_vectorized(ct_bucket* bucket1, ct_bucket* bucket2) {
+#ifdef __AVX512F__
+	// Runtime detection for AVX-512 support
+	static int avx512_checked = 0;
+	static int has_avx512 = 0;
+	
+	if (!avx512_checked) {
+		has_avx512 = __builtin_cpu_supports("avx512f") && __builtin_cpu_supports("avx512bw");
+		avx512_checked = 1;
+	}
+	
+	if (has_avx512) {
+		return unused_color_in_pair_avx512(bucket1, bucket2);
+	}
+#endif
+	
+	// Fallback to AVX2 version
 	assert(MAX_VALID_COLOR < 63);  // Otherwise all_valid_colors will overflow
 	
 	// Load headers from both buckets

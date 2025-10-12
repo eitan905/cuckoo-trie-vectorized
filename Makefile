@@ -24,7 +24,8 @@ endif
 OPTIMIZE_FLAGS=-O3 -fvisibility=hidden -flto -fno-strict-aliasing
 
 # Add -march=haswell to enable the bextr_u32 builtin and AVX2 instructions
-FLAGS=-march=haswell -mavx2 -Wreturn-type -Wuninitialized -Wunused-parameter $(STATS_FLAGS)
+# Add AVX-512 support for wider vectorization
+FLAGS=-march=haswell -mavx2 -mavx512f -mavx512bw -Wreturn-type -Wuninitialized -Wunused-parameter $(STATS_FLAGS)
 
 CC ?= gcc
 
