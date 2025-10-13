@@ -58,7 +58,7 @@ for key_size in "${key_sizes[@]}"; do
     for bench in "${benchmarks[@]}"; do
         echo "Running: $bench $key_size ($RUNS times)"
         
-        total_ms=0
+        total_throughput=0
         valid_runs=0
         
         for ((run=1; run<=RUNS; run++)); do
@@ -70,18 +70,19 @@ for key_size in "${key_sizes[@]}"; do
             if [[ $result_line =~ ops=([0-9]+).*ms=([0-9]+) ]]; then
                 ops=${BASH_REMATCH[1]}
                 ms=${BASH_REMATCH[2]}
-                total_ms=$(echo "scale=3; $total_ms + $ms" | bc -l)
+                throughput=$(echo "scale=3; $ops * 1000 / $ms / 1000000" | bc -l)
+                total_throughput=$(echo "scale=3; $total_throughput + $throughput" | bc -l)
                 valid_runs=$((valid_runs + 1))
-                echo "${ms} ms"
+                echo "${throughput} Mops/s"
             else
                 echo "FAILED"
             fi
         done
         
         if [[ $valid_runs -gt 0 ]]; then
-            avg_ms=$(echo "scale=2; $total_ms / $valid_runs" | bc -l)
-            echo "  Average: ${avg_ms} ms"
-            results["${bench}_${key_size}"]="$avg_ms"
+            avg_throughput=$(echo "scale=3; $total_throughput / $valid_runs" | bc -l)
+            echo "  Average: ${avg_throughput} Mops/s"
+            results["${bench}_${key_size}"]="$avg_throughput"
         else
             echo "  Average: N/A"
             results["${bench}_${key_size}"]="N/A"
@@ -92,7 +93,7 @@ for key_size in "${key_sizes[@]}"; do
 done
 
 echo "========================================" | tee -a $RESULTS_FILE
-echo "AVERAGE PERFORMANCE SUMMARY (ms)" | tee -a $RESULTS_FILE
+echo "AVERAGE PERFORMANCE SUMMARY (Mops/s)" | tee -a $RESULTS_FILE
 echo "Average of $RUNS runs per test" | tee -a $RESULTS_FILE
 echo "========================================" | tee -a $RESULTS_FILE
 printf "%-25s %-12s %-12s %-12s\n" "Benchmark" "rand-8" "rand-64" "rand-256" | tee -a $RESULTS_FILE
