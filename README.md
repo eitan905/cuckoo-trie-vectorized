@@ -16,9 +16,15 @@ The Cuckoo Trie only supports Linux systems with x86_64 processors.
 
 To build everything, run `make` in the root of the cloned repository. By default, a thread-safe version is built. To build a faster, non-thread-safe version, comment out `#define MULTITHREADING` from `config.h`.
 
+### Build Options
+
+- **Statistics Collection**: Control performance statistics collection with `make STATS=1` (enable) or `make STATS=0` (disable). Default is enabled. When enabled, the library collects detailed timing statistics for performance analysis.
+
 The build produces several files:
 - `libcuckoo_trie.so`: A dynamic library implementing the Cuckoo Trie (interface described in `API.md`).
+- `libcuckoo_trie_vectorized.so`: A vectorized version of the library optimized with AVX2/AVX-512 instructions.
 - `benchmark`: Allows to run various benchmarks with the Cuckoo Trie.
+- `benchmark_vectorized`: Benchmark tool using the vectorized library.
 - `test`: Performs basic tests on the Cuckoo Trie. Useful if you change the code.
 
 The library and the testing tool have `_debug` versions. These are compiled with a lower optimization level and assertions enabled to allow for easier debugging, but are significantly slower.
@@ -89,6 +95,30 @@ The dataset files used with `benchmark` are binary files with the following form
 - `Number of keys`: a 64-bit little-endian number.
 - `Total size of all keys`: a 64-bit little-endian number. This number does not include the size that precedes each key.
 - `Keys`: Each key is encoded as a 32-bit little-endian length `L`, followed by `L` key bytes. The keys are not NULL-terminated.
+
+## Automated Benchmarking (`run_benchmarks.sh`)
+
+The `run_benchmarks.sh` script provides automated performance testing across multiple key sizes and benchmark types. It runs comprehensive tests and generates summary reports.
+
+### Usage
+
+```sh
+./run_benchmarks.sh [-i iterations] [-v]
+```
+
+### Flags
+
+- `-i <N>`: Number of runs per test (default: 5). Higher values provide more stable averages.
+- `-v`: Use the vectorized benchmark binary (`benchmark_vectorized`) instead of the standard version.
+
+### Output
+
+The script generates:
+- Real-time progress output showing individual run results
+- A summary table with average performance across all key sizes (8, 64, 256 bytes)
+- Results saved to `vectorization_benchmark_results.txt`
+
+The script tests essential benchmarks including positive lookups, YCSB workloads (A and F), and insertion operations across both single-threaded and multi-threaded configurations.
 
 ## Test tool (`test`)
 
