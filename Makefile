@@ -6,7 +6,7 @@ TEST_SOURCES=test.c random.c dataset.c util.c
 TEST_DEPS=${TEST_SOURCES} cuckoo_trie.h random.h key_object.h dataset.h util.h
 BENCHMARK_SOURCES=benchmark.c random.c dataset.c util.c random_dist.c
 BENCHMARK_DEPS=${BENCHMARK_SOURCES} random.h cuckoo_trie.h dataset.h cuckoo_trie_internal.h util.h
-BINARIES=libcuckoo_trie.so libcuckoo_trie_debug.so libcuckoo_trie_vectorized.so test test_debug benchmark benchmark_vectorized race_test race_test_vectorized
+BINARIES=libcuckoo_trie.so libcuckoo_trie_debug.so libcuckoo_trie_vectorized.so test test_debug benchmark benchmark_vectorized
 
 # Statistics collection control: make STATS=0 (disable) or make STATS=1 (enable)
 ifdef STATS
@@ -54,9 +54,3 @@ benchmark: Makefile ${TEST_DEPS}
 
 benchmark_vectorized: Makefile ${TEST_DEPS}
 	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ ${BENCHMARK_SOURCES} libcuckoo_trie_vectorized.so -lpthread -lm
-
-race_test: Makefile race_test.c
-	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ race_test.c random.c dataset.c util.c libcuckoo_trie.so -lpthread
-
-race_test_vectorized: Makefile race_test.c
-	${CC} ${FLAGS} ${OPTIMIZE_FLAGS} -Wl,-rpath=. -o $@ race_test.c random.c dataset.c util.c libcuckoo_trie_vectorized.so -lpthread
