@@ -481,7 +481,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #ifdef COLLECT_STATISTICS
             prefilter_pass_count++;  // Prefilter passed
 #endif
-            read_entry_non_atomic(&(bucket->cells[0]), &(result->value));
+            memcpy(&(result->value), &(bucket->cells[0]), sizeof(ct_entry));
 			#ifdef MULTITHREADING
 						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
 #ifdef COLLECT_STATISTICS
@@ -509,7 +509,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #ifdef COLLECT_STATISTICS
             prefilter_pass_count++;  // Prefilter passed
 #endif
-            read_entry_non_atomic(&(bucket->cells[1]), &(result->value));
+            memcpy(&(result->value), &(bucket->cells[1]), sizeof(ct_entry));
 			#ifdef MULTITHREADING
 						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
 #ifdef COLLECT_STATISTICS
@@ -537,7 +537,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #ifdef COLLECT_STATISTICS
             prefilter_pass_count++;  // Prefilter passed
 #endif
-            read_entry_non_atomic(&(bucket->cells[2]), &(result->value));
+            memcpy(&(result->value), &(bucket->cells[2]), sizeof(ct_entry));
 			#ifdef MULTITHREADING
 						if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
 #ifdef COLLECT_STATISTICS
@@ -563,7 +563,7 @@ ct_entry_storage* find_entry_in_bucket_by_parent_vectorized(ct_bucket* bucket,
 #ifdef COLLECT_STATISTICS
             prefilter_pass_count++;  // Prefilter passed
 #endif
-            read_entry_non_atomic(&(bucket->cells[3]), &(result->value));
+            memcpy(&(result->value), &(bucket->cells[3]), sizeof(ct_entry));
 			#ifdef MULTITHREADING
 				if (read_int_atomic(&(bucket->write_lock_and_seq)) != start_counter) {
 #ifdef COLLECT_STATISTICS
